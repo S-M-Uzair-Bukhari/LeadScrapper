@@ -1,54 +1,12 @@
-# Environment variables and credentials
 .env
-.env.*
-!.env.example
 service-account.json
-*-service-account.json
-credentials.json
-secrets.json
-
-# Python bytecode and caches
 __pycache__/
 *.py[cod]
-*$py.class
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
 
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
-
-# Build and package output
-build/
-dist/
-*.egg-info/
-.eggs/
-
-# Generated scraper output and logs
+data/*.db
+data/*.db-shm
+data/*.db-wal
 output/
 logs/
 *.log
-
-# Selenium/browser artifacts
-*.crdownload
-*.part
-screenshots/
-chrome-profile/
-browser-profile/
-
-# IDE and editor settings
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS metadata
-.DS_Store
-Thumbs.db
-Desktop.ini

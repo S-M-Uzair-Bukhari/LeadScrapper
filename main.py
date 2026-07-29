@@ -25,7 +25,10 @@ console = Console()
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Scrape jobs from Upwork, Freelancer, Guru with client data.",
+        description=(
+            "Collect and qualify leads from Upwork, Vollna, Freelancer, "
+            "Guru, and Bark."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 platforms:
@@ -34,6 +37,7 @@ platforms:
   vollna          = Vollna.com (Upwork client data: rank, spending, rating)
   freelancer      = Freelancer.com (title, budget, skills)
   guru            = Guru.com (title, budget, skills)
+  bark            = Bark.com via Selenium (authenticated)
   all             = All platforms (default)
 
 examples:
@@ -47,7 +51,7 @@ examples:
     p.add_argument(
         "-k", "--keywords",
         nargs="+",
-        help="Search keywords (default: python, data entry, lead gen, web scraping)",
+        help="Search keywords (default: configured keyword catalog)",
     )
     p.add_argument(
         "-p", "--platforms",

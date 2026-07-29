@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class JobLead(BaseModel):
@@ -18,6 +18,8 @@ class JobLead(BaseModel):
     experience_level: str = ""
     country: str = ""
     valid_job: str = "Yes"
-    scraped_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    scraped_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     job_id: str = ""
     keyword_searched: str = ""

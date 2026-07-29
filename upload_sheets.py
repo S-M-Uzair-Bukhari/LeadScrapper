@@ -3,12 +3,21 @@
 import csv
 import os
 import logging
+import time
 from pathlib import Path
 from collections import defaultdict
 
 import gspread
+from gspread.utils import rowcol_to_a1
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
+from upwork_scraper.exporters.schema import (
+    COLUMN_WIDTHS,
+    LEGACY_SHEET_HEADERS,
+    SHEET_HEADERS,
+    TIMING_HEADERS,
+    TIMING_INSERT_INDEX,
+)
 
 load_dotenv()
 
@@ -17,15 +26,6 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 CREDS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service-account.json")
 CSV_PATH = "output/leads_20260716_211534.csv"
-
-SHEET_HEADERS = [
-    "Job Title", "Job URL", "Job Platform", "Date Posted", "Priority",
-    "Lead Score", "Company Name", "Company Website", "Company Domain",
-    "Email", "Business Email", "Phone", "LinkedIn URL",
-    "Decision-Maker Name", "Decision-Maker Title", "Budget", "Timeline",
-    "Location", "Industry", "Technologies", "Services Required",
-    "Qualification Reason", "Full Job Description",
-]
 
 PLATFORM_SHEET_MAP = {
     "Bark.com": "Bark.com",
@@ -40,6 +40,141 @@ COLOR_GREEN = {"red": 0.85, "green": 0.92, "blue": 0.83}
 COLOR_YELLOW = {"red": 1.0, "green": 0.95, "blue": 0.8}
 COLOR_RED = {"red": 1.0, "green": 0.85, "blue": 0.85}
 COLOR_HEADER = {"red": 0.2, "green": 0.2, "blue": 0.2}
+
+
+def _ensure_headers(worksheet) -> list[list[str]]:
+    """Create or repair row 1 without overwriting existing lead data."""
+    if worksheet.col_count < len(SHEET_HEADERS):
+        worksheet.add_cols(len(SHEET_HEADERS) - worksheet.col_count)
+
+    values = worksheet.get_all_values()
+    expected = [header.casefold().strip() for header in SHEET_HEADERS]
+    current = (
+        [value.casefold().strip() for value in values[0][:len(SHEET_HEADERS)]]
+        if values
+        else []
+    )
+    legacy = [header.casefold().strip() for header in LEGACY_SHEET_HEADERS]
+    header_range = f"A1:{rowcol_to_a1(1, len(SHEET_HEADERS))}"
+
+    if not values:
+        worksheet.update(range_name=header_range, values=[SHEET_HEADERS])
+    elif current[:len(legacy)] == legacy and len(current) == len(legacy):
+        worksheet.spreadsheet.batch_update({
+            "requests": [{
+                "insertDimension": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "dimension": "COLUMNS",
+                        "startIndex": TIMING_INSERT_INDEX,
+                        "endIndex": TIMING_INSERT_INDEX + len(TIMING_HEADERS),
+                    },
+                    "inheritFromBefore": False,
+                }
+            }]
+        })
+        worksheet.update(range_name=header_range, values=[SHEET_HEADERS])
+    elif current != expected:
+        worksheet.insert_row(
+            SHEET_HEADERS,
+            index=1,
+            value_input_option="RAW",
+        )
+    else:
+        worksheet.update(range_name=header_range, values=[SHEET_HEADERS])
+
+    return worksheet.get_all_values()
+
+
+def _apply_fixed_layout(worksheet) -> None:
+    """Apply deterministic dimensions so long values cannot resize cells."""
+    sheet_id = worksheet.id
+    requests = []
+
+    for column_index, width in enumerate(COLUMN_WIDTHS):
+        requests.append({
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": column_index,
+                    "endIndex": column_index + 1,
+                },
+                "properties": {"pixelSize": width},
+                "fields": "pixelSize",
+            }
+        })
+
+    requests.extend([
+        {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": 0,
+                    "endIndex": 1,
+                },
+                "properties": {"pixelSize": 42},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": 1,
+                    "endIndex": worksheet.row_count,
+                },
+                "properties": {"pixelSize": 36},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": worksheet.row_count,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": len(SHEET_HEADERS),
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "wrapStrategy": "CLIP",
+                        "verticalAlignment": "TOP",
+                    }
+                },
+                "fields": (
+                    "userEnteredFormat.wrapStrategy,"
+                    "userEnteredFormat.verticalAlignment"
+                ),
+            }
+        },
+        {
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": sheet_id,
+                    "gridProperties": {"frozenRowCount": 1},
+                },
+                "fields": "gridProperties.frozenRowCount",
+            }
+        },
+    ])
+
+    worksheet.spreadsheet.batch_update({"requests": requests})
+    header_range = f"A1:{rowcol_to_a1(1, len(SHEET_HEADERS))}"
+    worksheet.format(header_range, {
+        "backgroundColor": COLOR_HEADER,
+        "horizontalAlignment": "CENTER",
+        "verticalAlignment": "MIDDLE",
+        "wrapStrategy": "CLIP",
+        "textFormat": {
+            "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+            "bold": True,
+        },
+    })
+
 
 def main():
     if not SHEET_ID:
@@ -74,15 +209,19 @@ def main():
         except Exception:
             worksheet = sheet.add_worksheet(title=sheet_name, rows=1000, cols=25)
 
-        existing_titles = set()
         try:
-            all_values = worksheet.get_all_values()
-            if len(all_values) > 1:
-                headers = [h.lower().strip() for h in all_values[0]]
-                title_col = headers.index("job title") if "job title" in headers else 0
-                existing_titles = {row[title_col] for row in all_values[1:] if row[title_col]}
-        except Exception:
-            pass
+            all_values = _ensure_headers(worksheet)
+        except Exception as exc:
+            logging.error("  Could not create headers for %s: %s", sheet_name, exc)
+            continue
+
+        headers = [header.casefold().strip() for header in all_values[0]]
+        title_col = headers.index("job title")
+        existing_titles = {
+            row[title_col]
+            for row in all_values[1:]
+            if len(row) > title_col and row[title_col]
+        }
 
         new_rows = []
         for row in leads:
@@ -91,25 +230,21 @@ def main():
             new_rows.append([row.get(h, "") for h in SHEET_HEADERS])
 
         if not new_rows:
+            try:
+                _apply_fixed_layout(worksheet)
+                worksheet.set_basic_filter()
+            except Exception as exc:
+                logging.warning("  Layout formatting failed: %s", exc)
             print("  No new leads to upload.")
             continue
 
-        if not existing_titles:
-            worksheet.update("A1", [SHEET_HEADERS])
-            header_range = f"A1:{chr(64 + len(SHEET_HEADERS))}1"
-            worksheet.format(header_range, {
-                "backgroundColor": COLOR_HEADER,
-                "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
-            })
-            try:
-                worksheet.freeze("2")
-                worksheet.set_basic_filter()
-            except Exception:
-                pass
-
         worksheet.append_rows(new_rows, value_input_option="USER_ENTERED")
+        try:
+            _apply_fixed_layout(worksheet)
+            worksheet.set_basic_filter()
+        except Exception as exc:
+            logging.warning("  Leads uploaded, but layout formatting failed: %s", exc)
         print(f"  Uploaded {len(new_rows)} new leads.")
-        import time
         time.sleep(2)
 
     print("\nDone!")

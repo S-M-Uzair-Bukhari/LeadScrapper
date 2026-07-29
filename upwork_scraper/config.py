@@ -246,11 +246,14 @@ class ScraperConfig:
     platforms: list[str] = field(default_factory=lambda: ["all"])
 
     # Scraping behavior
-    max_results_per_keyword: int = 50
+    max_results_per_keyword: int = 20
     min_delay: float = 1.5
     max_delay: float = 4.0
     timeout: int = 30
     max_retries: int = 3
+    max_platform_workers: int = 4
+    max_browser_workers: int = 2
+    event_queue_size: int = 100
 
     # TLS fingerprint
     impersonate_browser: str = "chrome"
@@ -263,10 +266,17 @@ class ScraperConfig:
     # Output
     output_dir: str = "output"
     output_format: str = "csv"  # csv | json
+    database_path: str = "data/leads.db"
 
     # Google Sheets
     google_sheet_id: str = os.getenv("GOOGLE_SHEET_ID", "")
     google_credentials_path: str = os.getenv("GOOGLE_CREDENTIALS_PATH", "service-account.json")
+    sheets_batch_size: int = 10
+    sheets_min_write_interval: float = 1.1
+    sheets_retry_attempts: int = 5
+    sheets_retry_base_delay: float = 5.0
+    sheets_retry_max_delay: float = 60.0
+    sheets_quota_cooldown: float = 60.0
 
     # Selenium / authenticated Upwork
     upwork_username: str = os.getenv("UPWORK_USERNAME", "")
