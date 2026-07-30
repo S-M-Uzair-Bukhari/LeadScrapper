@@ -7,8 +7,8 @@ the results to CSV/JSON and optionally Google Sheets.
 ## Architecture
 
 This project is a concurrent, queue-oriented modular monolith. Platform
-scrapers run independently, while all results pass through one shared
-processing and output pipeline.
+scrapers run independently. Their nested keyword workers process leads and
+send accepted results to a dedicated output queue for that platform.
 
 ```text
 main.py
@@ -18,43 +18,44 @@ LeadEngine
    |
    v
 PlatformScheduler
-   +-- Upwork worker ----------+
-   +-- Upwork Selenium worker -+
-   +-- Vollna worker ----------+--> keyword results
-   +-- Freelancer worker ------+
-   +-- Guru worker ------------+
-   +-- Bark worker ------------+
-                               |
-                               v
-                      Shared lead pipeline
-                               |
-                   normalize to JobLead
-                               |
-                       global deduplicate
-                               |
-                       analyze and score
-                               |
-                    strict US/Canada client filter
-                               |
-                +--------------+--------------+
-                |                             |
-                v                             v
-        SQLite checkpoint              Sheets buffer
-                                              |
-                                      upload every 10
-                                              |
-                                              v
-                                  unified Leads tab
-                |
-                v
-        final CSV or JSON
+   |
+   +-- Upwork platform worker
+   |      +-- keyword workers: scrape -> analyze -> qualify
+   |      `-- bounded Upwork output queue -> Upwork output worker ---+
+   +-- Freelancer platform worker                                  |
+   |      +-- keyword workers: scrape -> analyze -> qualify         |
+   |      `-- bounded Freelancer output queue -> output worker -----+
+   +-- Guru platform worker                                        |
+   |      +-- keyword workers: scrape -> analyze -> qualify         |
+   |      `-- bounded Guru output queue -> output worker -----------+
+   `-- Vollna platform worker                                      |
+          +-- fetch once -> resolve job countries -> qualify        |
+          `-- bounded Vollna output queue -> output worker ---------+
+                                                                   |
+                                          +------------------------+--+
+                                          |                           |
+                                          v                           v
+                                  SQLite checkpoints       synchronized Sheets writes
+                                                                      |
+                                                               unified Leads tab
+                                                                      |
+                                                               batches of 5
+
+LeadEngine/main thread: supervise events, print progress, export final CSV/JSON
 ```
 
 Platforms run concurrently with a bounded worker pool. Upwork Selenium uses
 two keyword workers with isolated Chrome/ChromeDriver sessions. Freelancer
 and Guru use three keyword workers with separate scraper sessions. The global
 browser semaphore still permits at most two simultaneous browsers. Vollna
-fetches its RSS feed once per run and filters every keyword locally.
+fetches its RSS feed once per run, filters every keyword locally, and uses an
+authenticated Upwork detail resolver only for linked jobs whose country is
+missing. Resolved countries are cached by Upwork job ID across both sources.
+
+Upwork searches are prefiltered at the source with separate client-location
+queries for `United States` and `Canada`. The per-keyword result allowance is
+divided between both countries, and each request asks for 50 jobs per page.
+The strict local location filter still validates every result before saving.
 
 The platform scraper implementations retain their original selectors,
 requests, parsing, login, and fallback behavior. The adapter layer only gives
@@ -62,20 +63,23 @@ them a common `scrape(keyword)` interface.
 
 ## Processing lifecycle
 
-For every keyword result:
+For every keyword result, the nested keyword worker:
 
 1. Convert platform output to the shared `JobLead` model.
 2. Remove duplicate titles across the current run.
 3. Extract business information and calculate the lead score.
-4. Keep only leads whose platform-provided client location is US or Canada.
-5. Save the qualified lead to `data/leads.db`.
-6. Add it to the platform's Google Sheets buffer.
-7. Upload when that buffer reaches 10 leads.
-8. Flush fewer than 10 remaining leads when the platform finishes.
-9. Write one final timestamped CSV or JSON after all platforms finish.
+4. Trust Upwork's server-side client-country query when present; otherwise
+   resolve missing Upwork/Vollna countries from authenticated detail pages.
+5. Apply the strict local US/Canada check.
+6. Put each accepted lead into its platform's bounded output queue.
 
-Only one component writes to Google Sheets. Platform workers never write to
-Sheets directly, preventing concurrent append and worksheet-creation races.
+Each platform output worker then saves its leads to `data/leads.db` and adds
+them to the shared Google Sheets buffer. The buffer uploads every 5 eligible
+leads and flushes the remainder as platforms finish. Actual operations on the
+unified `Leads` tab use a short shared lock so concurrent platform workers
+cannot race worksheet creation, duplicate checks, or row insertion. The main
+thread only supervises progress and creates the final CSV/JSON after all
+output queues drain.
 
 ## Project layout
 
@@ -93,7 +97,8 @@ upwork_scraper/
 |-- orchestration/
 |   |-- engine.py              application coordinator
 |   |-- scheduler.py           bounded platform concurrency
-|   `-- events.py              worker-to-engine messages
+|   |-- events.py              worker-to-engine progress messages
+|   `-- output_worker.py       per-platform output queues and workers
 |
 |-- pipeline/
 |   |-- processor.py           processing stage coordinator
@@ -105,7 +110,7 @@ upwork_scraper/
 |
 |-- exporters/
 |   |-- local.py               CSV/JSON export
-|   |-- sheets.py              single-writer batch upload
+|   |-- sheets.py              synchronized unified-tab batch upload
 |   |-- rows.py                output row conversion
 |   `-- schema.py              stable headers and tab mappings
 |
@@ -221,6 +226,8 @@ The main structural settings are in `ScraperConfig`:
 | `upwork_keyword_workers` | `2` | Isolated Selenium keyword/browser workers |
 | `http_keyword_workers` | `3` | Keyword workers for Freelancer and Guru |
 | `event_queue_size` | `100` | Maximum keyword-result batches awaiting processing |
+| `output_queue_size` | `500` | Qualified leads awaiting the output worker |
+| `upwork_location_timeout` | `12` | Seconds to wait for client country on an Upwork detail page |
 | `max_results_per_keyword` | `50` | Result cap returned by each platform search |
 | `google_sheet_tab` | `Leads` | Single worksheet receiving every platform |
 | `sheets_batch_size` | `5` | Eligible leads per streaming Sheets upload |

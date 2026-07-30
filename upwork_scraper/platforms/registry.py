@@ -57,11 +57,7 @@ def build_platform_adapters(config: ScraperConfig) -> dict[str, PlatformAdapter]
             "upwork",
             scraper.search_keyword,
             scraper.close,
-            resource_group=(
-                "http"
-                if "upwork_selenium" in resolved_platforms
-                else "browser"
-            ),
+            resource_group="browser",
         )
 
     if "upwork_selenium" in resolved_platforms:
@@ -84,6 +80,7 @@ def build_platform_adapters(config: ScraperConfig) -> dict[str, PlatformAdapter]
             "vollna",
             scraper.search_keyword,
             scraper.close,
+            resource_group="browser",
             scrape_many_fn=scraper.search_keywords,
         )
 

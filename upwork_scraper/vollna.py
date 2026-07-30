@@ -31,6 +31,7 @@ class VollnaScraper:
             impersonate=self.config.impersonate_browser
         )
         self._seen_titles: set[str] = set()
+        self._location_resolver = None
 
     def search_keyword(self, keyword: str) -> list[JobLead]:
         """Fetch jobs from Vollna RSS feed filtered by keyword."""
@@ -39,9 +40,11 @@ class VollnaScraper:
         if not xml_data:
             return []
 
-        return self._parse_jobs(
+        leads = self._parse_jobs(
             xml_data, keyword
         )[:self.config.max_results_per_keyword]
+        self._enrich_locations(leads)
+        return leads
 
     def search_keywords(
         self,
@@ -56,12 +59,35 @@ class VollnaScraper:
         xml_data = self._fetch(VOLLNA_RSS_URL)
         if not xml_data:
             return {keyword: [] for keyword in keywords}
-        return {
+        results = {
             keyword: self._parse_jobs(xml_data, keyword)[
                 :self.config.max_results_per_keyword
             ]
             for keyword in keywords
         }
+        unique_leads = {
+            lead.url: lead
+            for leads in results.values()
+            for lead in leads
+            if lead.url
+        }
+        self._enrich_locations(list(unique_leads.values()))
+        return results
+
+    def _enrich_locations(self, leads: list[JobLead]) -> None:
+        unresolved = list({
+            lead.url: lead
+            for lead in leads
+            if not (lead.country or lead.location)
+            and "upwork.com" in lead.url.casefold()
+        }.values())
+        if not unresolved:
+            return
+        if self._location_resolver is None:
+            from .selenium_scraper import UpworkSeleniumScraper
+
+            self._location_resolver = UpworkSeleniumScraper(self.config)
+        self._location_resolver.enrich_client_locations(unresolved)
 
     def _fetch(self, url: str) -> Optional[str]:
         for attempt in range(1, self.config.max_retries + 1):
@@ -186,4 +212,7 @@ class VollnaScraper:
         )
 
     def close(self):
+        if self._location_resolver is not None:
+            self._location_resolver.close()
+            self._location_resolver = None
         self.session.close()

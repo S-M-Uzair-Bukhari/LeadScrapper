@@ -85,6 +85,42 @@ class SchedulerConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(maximum_active, 2)
 
+    def test_lead_processing_callback_runs_in_keyword_workers(self) -> None:
+        processing_threads: list[str] = []
+
+        def scrape(keyword: str) -> list[JobLead]:
+            return [JobLead(title=keyword)]
+
+        def process(_: str, __: str, leads: list[JobLead]) -> int:
+            processing_threads.append(threading.current_thread().name)
+            return len(leads)
+
+        scheduler = PlatformScheduler(
+            adapters={
+                "test": PlatformAdapter(
+                    "test",
+                    scrape,
+                    keyword_workers=2,
+                )
+            },
+            keywords=["one", "two"],
+            max_workers=1,
+            max_browser_workers=1,
+            queue_size=10,
+            process_leads=process,
+        )
+
+        results = [
+            event
+            for event in scheduler.events()
+            if isinstance(event, KeywordResult)
+        ]
+
+        self.assertEqual([event.qualified_count for event in results], [1, 1])
+        self.assertTrue(
+            all("test-keyword" in name for name in processing_threads)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

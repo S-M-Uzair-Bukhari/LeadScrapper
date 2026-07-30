@@ -8,6 +8,7 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Callable, TypeVar
 
 from gspread.exceptions import WorksheetNotFound
@@ -75,8 +76,13 @@ class SheetsBatchWriter:
         self._recorded_primary_outcomes: set[tuple[str, str]] = set()
         self._sleep = time.sleep
         self._monotonic = time.monotonic
+        self._lock = RLock()
 
     def add(self, item: ProcessedLead, dedup_key: str) -> None:
+        with self._lock:
+            self._add(item, dedup_key)
+
+    def _add(self, item: ProcessedLead, dedup_key: str) -> None:
         if not self.enabled:
             return
         platform_label = self._platform_label(item)
@@ -106,20 +112,26 @@ class SheetsBatchWriter:
             self._flush_sheet(sheet_name, self.batch_size)
 
     def flush_platform(self, platform_label: str) -> None:
-        if not self.enabled:
-            return
-        sheet_name = getattr(self.config, "google_sheet_tab", "Leads")
-        if sheet_name in self._buffers:
-            self._flush_sheet(sheet_name, force=True)
+        with self._lock:
+            if not self.enabled:
+                return
+            sheet_name = getattr(self.config, "google_sheet_tab", "Leads")
+            if sheet_name in self._buffers:
+                self._flush_sheet(sheet_name, force=True)
 
     def flush_all(self) -> None:
-        if not self.enabled:
-            return
-        for sheet_name in list(self._buffers):
-            self._flush_sheet(sheet_name, force=True)
+        with self._lock:
+            if not self.enabled:
+                return
+            for sheet_name in list(self._buffers):
+                self._flush_sheet(sheet_name, force=True)
 
     def stats(self) -> dict[str, dict[str, int]]:
         """Return per-platform run outcomes for console reporting."""
+        with self._lock:
+            return self._stats_snapshot()
+
+    def _stats_snapshot(self) -> dict[str, dict[str, int]]:
         pending: Counter = Counter()
         for buffer in self._buffers.values():
             for entry in buffer:

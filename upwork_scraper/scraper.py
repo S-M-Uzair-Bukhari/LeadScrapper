@@ -55,24 +55,39 @@ class UpworkScraper:
         if self.config.collection_recency_hours is not None:
             leads = self._search_direct(keyword)
             if leads:
-                return leads[:self.config.max_results_per_keyword]
+                return self._with_client_locations(leads)
             if not self.selenium_fallback:
                 return []
-            return self._search_via_selenium(
-                keyword
-            )[:self.config.max_results_per_keyword]
+            return self._with_client_locations(
+                self._search_via_selenium(keyword)
+            )
 
         leads = self._search_via_wayback(keyword)
         if leads:
-            return leads[:self.config.max_results_per_keyword]
+            return self._with_client_locations(leads)
         leads = self._search_direct(keyword)
         if leads:
-            return leads[:self.config.max_results_per_keyword]
+            return self._with_client_locations(leads)
         if not self.selenium_fallback:
             return []
-        return self._search_via_selenium(
-            keyword
-        )[:self.config.max_results_per_keyword]
+        return self._with_client_locations(
+            self._search_via_selenium(keyword)
+        )
+
+    def _with_client_locations(
+        self,
+        leads: list[JobLead],
+    ) -> list[JobLead]:
+        selected = leads[:self.config.max_results_per_keyword]
+        if not selected:
+            return selected
+        if (
+            not hasattr(self, "_selenium_scraper")
+            or self._selenium_scraper is None
+        ):
+            self._selenium_scraper = UpworkSeleniumScraper(self.config)
+        self._selenium_scraper.enrich_client_locations(selected)
+        return selected
 
     def _search_via_selenium(self, keyword: str) -> list[JobLead]:
         try:
@@ -359,23 +374,52 @@ class UpworkScraper:
         leads: list[JobLead] = []
         reference = datetime.now(timezone.utc)
         search_url = "https://www.upwork.com/nx/search/jobs/"
-        for page in range(1, max(1, self.config.page_limit) + 1):
-            params = {"q": keyword, "sort": "recency", "page": str(page)}
-            html = self._fetch_direct(search_url, params=params)
-            if not html or len(html) <= 1000:
-                break
-            cards = self._parse_search_page(HTMLParser(html), keyword)
-            leads.extend(cards)
-            if (
-                len(leads) >= self.config.max_results_per_keyword
-                or not cards
-                or RecencyFilter.page_reaches_boundary(
-                    cards,
-                    self.config.collection_recency_hours,
-                    reference,
+        locations = UpworkSeleniumScraper(
+            self.config
+        )._client_search_locations()
+        per_location_limit = max(
+            1,
+            (
+                self.config.max_results_per_keyword
+                + len(locations)
+                - 1
+            )
+            // len(locations),
+        )
+        for client_location in locations:
+            location_leads: list[JobLead] = []
+            for page in range(1, max(1, self.config.page_limit) + 1):
+                params = {
+                    "q": keyword,
+                    "sort": "recency",
+                    "page": str(page),
+                    "per_page": "50",
+                }
+                if client_location:
+                    params["location"] = client_location
+                html = self._fetch_direct(search_url, params=params)
+                if not html or len(html) <= 1000:
+                    break
+                cards = self._parse_search_page(
+                    HTMLParser(html),
+                    keyword,
                 )
-            ):
-                break
+                for card in cards:
+                    if client_location:
+                        card.location = client_location
+                        card.country = client_location
+                location_leads.extend(cards)
+                if (
+                    len(location_leads) >= per_location_limit
+                    or not cards
+                    or RecencyFilter.page_reaches_boundary(
+                        cards,
+                        self.config.collection_recency_hours,
+                        reference,
+                    )
+                ):
+                    break
+            leads.extend(location_leads[:per_location_limit])
         return leads[:self.config.max_results_per_keyword]
 
     def _fetch_direct(self, url: str, params: dict | None = None) -> Optional[str]:

@@ -270,6 +270,7 @@ class ScraperConfig:
     upwork_keyword_workers: int = 2
     http_keyword_workers: int = 3
     event_queue_size: int = 100
+    output_queue_size: int = 500
 
     # Daily adaptive run policy
     adaptive_daily_limits: bool = True
@@ -317,6 +318,7 @@ class ScraperConfig:
     upwork_password: str = os.getenv("UPWORK_PASSWORD", "")
     selenium_max_scrolls: int = 8
     selenium_command_timeout: float = 45.0
+    upwork_location_timeout: int = 12
 
     # Bark.com
     bark_username: str = os.getenv("BARK_USERNAME", "")

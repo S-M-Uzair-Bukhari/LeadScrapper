@@ -6,6 +6,7 @@ import logging
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from threading import local
 
 from rich.console import Console
 from rich.table import Table
@@ -24,6 +25,7 @@ from ..platforms.registry import build_platform_adapters
 from ..storage.sqlite_repository import SQLiteLeadRepository
 from ..timezones import resolve_timezone
 from .events import KeywordResult, PlatformFinished
+from .output_worker import PlatformOutputWorkers
 from .policy import DailyRunPolicy
 from .scheduler import PlatformScheduler
 
@@ -71,16 +73,17 @@ class LeadEngine:
 
         self._adapters = build_platform_adapters(self.config)
         self._deduplicator = RunDeduplicator()
-        self._processor = LeadProcessor(
-            LeadAnalyzer(),
-            self._deduplicator,
-            LocationFilter(self.config.target_locations),
-            RecencyFilter(
-                self.run_policy.recency_hours,
-                keep_unknown=self.config.keep_unknown_posted_dates,
-            ),
-        )
+        self._processor_local = local()
         self._sheets = SheetsBatchWriter(self.config, self._repository)
+        self._output = PlatformOutputWorkers(
+            list(self._adapters),
+            self._repository,
+            self._sheets,
+            self.config.output_queue_size,
+        )
+        self._processed = self._output.processed
+        self.all_leads = self._output.all_leads
+        self.all_analyses = self._output.all_analyses
         self._local_exporter = LocalExporter(
             self.config.output_dir, self.config.output_format
         )
@@ -119,30 +122,31 @@ class LeadEngine:
         )
         console.print(
             f"Sheets batch: [cyan]{self.config.sheets_batch_size} "
-            "qualified leads[/cyan]"
+            "qualified leads; "
+            f"{self._output.worker_count} platform output workers[/cyan]"
         )
 
+        self._output.start()
         scheduler = PlatformScheduler(
             adapters=self._adapters,
             keywords=self.config.keywords,
             max_workers=self.config.max_platform_workers,
             max_browser_workers=self.config.max_browser_workers,
             queue_size=self.config.event_queue_size,
+            process_leads=self._process_scraped_leads,
         )
-        worker_sheet_labels: dict[str, set[str]] = defaultdict(set)
 
         for event in scheduler.events():
             if isinstance(event, KeywordResult):
-                self._handle_keyword_result(event, worker_sheet_labels)
+                self._handle_keyword_result(event)
             elif isinstance(event, PlatformFinished):
-                for label in worker_sheet_labels[event.platform_worker]:
-                    self._sheets.flush_platform(label)
+                self._output.flush_platform(event.platform_worker)
                 console.print(
                     f"[green]Platform completed:[/green] "
                     f"{event.platform_worker}"
                 )
 
-        self._sheets.flush_all()
+        self._output.finish()
         path = self._local_exporter.export(self._processed, self.run_id)
         self._repository.mark_run_completed()
         self.last_run_duration_seconds = time.monotonic() - run_started_at
@@ -191,7 +195,6 @@ class LeadEngine:
     def _handle_keyword_result(
         self,
         event: KeywordResult,
-        worker_sheet_labels: dict[str, set[str]],
     ) -> None:
         if event.error:
             logger.warning(
@@ -202,34 +205,50 @@ class LeadEngine:
             )
             return
 
-        accepted = 0
         platform_label = self._event_platform_label(event)
-        self._scraped_counts[platform_label] += len(event.leads)
-        for lead in event.leads:
-            lead.keyword_searched = event.keyword
-            item = self._processor.process(lead)
-            if item is None:
-                continue
-
-            dedup_key = self._deduplicator.key(lead)
-            self._repository.save(
-                event.platform_worker,
-                event.keyword,
-                item,
-                dedup_key,
-            )
-            self._processed.append(item)
-            self.all_leads.append(lead)
-            self.all_analyses[lead.title] = item.analysis
-            worker_sheet_labels[event.platform_worker].add(lead.platform)
-            self._sheets.add(item, dedup_key)
-            accepted += 1
+        scraped_count = event.scraped_count or len(event.leads)
+        self._scraped_counts[platform_label] += scraped_count
 
         console.print(
             f"  {event.platform_worker} | {event.keyword}: "
-            f"{len(event.leads)} scraped, "
-            f"[green]{accepted} qualified/new[/green]"
+            f"{scraped_count} scraped, "
+            f"[green]{event.qualified_count} qualified/new[/green]"
         )
+
+    def _process_scraped_leads(
+        self,
+        platform_worker: str,
+        keyword: str,
+        leads: list[JobLead],
+    ) -> int:
+        """Run analysis in the keyword worker, then queue accepted output."""
+        processor = getattr(self._processor_local, "processor", None)
+        if processor is None:
+            processor = LeadProcessor(
+                LeadAnalyzer(),
+                self._deduplicator,
+                LocationFilter(self.config.target_locations),
+                RecencyFilter(
+                    self.run_policy.recency_hours,
+                    keep_unknown=self.config.keep_unknown_posted_dates,
+                ),
+            )
+            self._processor_local.processor = processor
+
+        accepted = 0
+        for lead in leads:
+            lead.keyword_searched = keyword
+            item = processor.process(lead)
+            if item is None:
+                continue
+            self._output.submit(
+                platform_worker,
+                keyword,
+                item,
+                self._deduplicator.key(lead),
+            )
+            accepted += 1
+        return accepted
 
     def _print_summary(self) -> None:
         table = Table(title="Lead Collection Summary", show_lines=True)
@@ -307,8 +326,11 @@ class LeadEngine:
 
     @staticmethod
     def _event_platform_label(event: KeywordResult) -> str:
-        if event.leads:
-            platform = event.leads[0].platform
+        if event.source_platform or event.leads:
+            platform = (
+                event.source_platform
+                or event.leads[0].platform
+            )
             return PLATFORM_SHEET_MAP.get(platform, platform)
         return {
             "upwork": "Upwork",
@@ -322,6 +344,10 @@ class LeadEngine:
     def close(self) -> None:
         if self._closed:
             return
+        try:
+            self._output.close()
+        except Exception as exc:
+            logger.warning("Failed to close output worker: %s", exc)
         for adapter in self._adapters.values():
             try:
                 adapter.close()

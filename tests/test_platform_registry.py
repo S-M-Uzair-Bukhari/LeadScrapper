@@ -33,9 +33,17 @@ class PlatformRegistryTests(unittest.TestCase):
                 adapters["upwork_selenium"].keyword_workers,
                 2,
             )
+            self.assertEqual(
+                adapters["upwork_selenium"].resource_group,
+                "browser",
+            )
             self.assertEqual(adapters["freelancer"].keyword_workers, 3)
             self.assertEqual(adapters["guru"].keyword_workers, 3)
             self.assertIsNotNone(adapters["vollna"].scrape_many_fn)
+            self.assertEqual(
+                adapters["vollna"].resource_group,
+                "browser",
+            )
         finally:
             for adapter in adapters.values():
                 adapter.close()

@@ -9,6 +9,69 @@ from upwork_scraper.selenium_scraper import UpworkSeleniumScraper
 
 
 class UpworkPaginationTests(unittest.TestCase):
+    def test_detail_location_keeps_only_country_line(self) -> None:
+        self.assertEqual(
+            UpworkSeleniumScraper._clean_client_location(
+                "United States\nSan Jose2:16 PM"
+            ),
+            "United States",
+        )
+        self.assertEqual(
+            UpworkSeleniumScraper._clean_client_location(
+                "Canada\nToronto 5:16 PM"
+            ),
+            "Canada",
+        )
+
+    def test_search_enriches_missing_client_location(self) -> None:
+        scraper = UpworkSeleniumScraper(ScraperConfig())
+        lead = JobLead(
+            title="Needs location",
+            url="https://www.upwork.com/jobs/~012345",
+        )
+        calls: list[tuple[list[JobLead], bool]] = []
+        scraper._scrape_keyword = lambda _: [lead]
+        scraper.enrich_client_locations = (
+            lambda leads, ensure_logged_in=True: calls.append(
+                (leads, ensure_logged_in)
+            )
+        )
+
+        result = scraper.search_keyword("react")
+
+        self.assertEqual(result, [lead])
+        self.assertEqual(calls, [([lead], False)])
+
+    def test_enrichment_caches_country_by_upwork_job_id(self) -> None:
+        scraper = UpworkSeleniumScraper(ScraperConfig())
+        first = JobLead(
+            title="First",
+            url="https://www.upwork.com/jobs/title_~099999/",
+        )
+        second = JobLead(
+            title="Second",
+            url="https://www.upwork.com/jobs/~099999?source=rss",
+        )
+        scraper._get_driver = lambda: object()
+        scraper._resolve_client_location = (
+            lambda _driver, _url: "United States"
+        )
+
+        scraper.enrich_client_locations(
+            [first],
+            ensure_logged_in=False,
+        )
+        scraper._resolve_client_location = (
+            lambda *_: self.fail("cached location should be reused")
+        )
+        scraper.enrich_client_locations(
+            [second],
+            ensure_logged_in=False,
+        )
+
+        self.assertEqual(first.country, "United States")
+        self.assertEqual(second.country, "United States")
+
     def test_catch_up_requests_pages_until_lookback_boundary(self) -> None:
         config = ScraperConfig(
             max_results_per_keyword=1000,
@@ -19,7 +82,7 @@ class UpworkPaginationTests(unittest.TestCase):
         scraper._get_driver = lambda: object()
         scraper._ensure_logged_in = lambda _: True
 
-        requested_pages: list[int] = []
+        requested_pages: list[tuple[str, int]] = []
         pages = {
             1: [
                 JobLead(
@@ -48,16 +111,33 @@ class UpworkPaginationTests(unittest.TestCase):
             query = parse_qs(urlparse(url).query)
             page = int(query["page"][0])
             self.assertEqual(query["per_page"], ["50"])
-            requested_pages.append(page)
-            return pages.get(page, [])
+            location = query["location"][0]
+            requested_pages.append((location, page))
+            return [
+                lead.model_copy(deep=True)
+                for lead in pages.get(page, [])
+            ]
 
         scraper._load_jobs = load_jobs
         scraper._parse_card = lambda card, _: card
 
         leads = scraper._scrape_keyword("web development")
 
-        self.assertEqual(requested_pages, [1, 2, 3])
+        self.assertEqual(
+            requested_pages,
+            [
+                ("United States", 1),
+                ("United States", 2),
+                ("United States", 3),
+                ("Canada", 1),
+                ("Canada", 2),
+                ("Canada", 3),
+            ],
+        )
         self.assertEqual(len(leads), 3)
+        self.assertTrue(
+            all(lead.country == "United States" for lead in leads)
+        )
 
     def test_date_only_values_are_not_rejected_when_day_overlaps_window(
         self,
@@ -107,7 +187,7 @@ class UpworkPaginationTests(unittest.TestCase):
 
         leads = scraper._scrape_keyword("web development")
 
-        self.assertEqual(calls[0], 2)
+        self.assertEqual(calls[0], 4)
         self.assertEqual(len(leads), 1)
 
     def test_restarts_browser_once_after_local_driver_timeout(self) -> None:

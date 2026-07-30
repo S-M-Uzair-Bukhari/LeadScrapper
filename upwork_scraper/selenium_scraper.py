@@ -27,6 +27,8 @@ from .pipeline.recency_filter import RecencyFilter
 
 logger = logging.getLogger(__name__)
 _DRIVER_LAUNCH_LOCK = Lock()
+_LOCATION_CACHE_LOCK = Lock()
+_LOCATION_CACHE: dict[str, str] = {}
 
 LOGIN_URL = "https://www.upwork.com/ab/account-security/login"
 SEARCH_URL = "https://www.upwork.com/nx/search/jobs/"
@@ -41,6 +43,11 @@ JOB_LINK_SELECTORS = [
     "a[data-test='job-tile-title-link']",
     "h2 a[href*='/jobs/']",
     "a[href*='/jobs/']",
+]
+CLIENT_LOCATION_SELECTORS = [
+    "[data-qa='client-location']",
+    "[data-test='client-location']",
+    "[data-test='client-country']",
 ]
 
 
@@ -62,6 +69,10 @@ class UpworkSeleniumScraper:
         for attempt in range(2):
             try:
                 leads = self._scrape_keyword(keyword)
+                self.enrich_client_locations(
+                    leads,
+                    ensure_logged_in=False,
+                )
                 return leads[:self.config.max_results_per_keyword]
             except Exception as exc:
                 if attempt == 0 and self._is_browser_failure(exc):
@@ -75,6 +86,116 @@ class UpworkSeleniumScraper:
                     continue
                 raise
         return []
+
+    def enrich_client_locations(
+        self,
+        leads: list[JobLead],
+        *,
+        ensure_logged_in: bool = True,
+    ) -> None:
+        """Populate missing client countries from Upwork detail pages."""
+        unresolved = [
+            lead
+            for lead in leads
+            if not (lead.country or lead.location)
+            and self._location_cache_key(lead.url)
+        ]
+        if not unresolved:
+            return
+
+        driver = None
+        resolved_count = 0
+        unavailable_count = 0
+        for lead in unresolved:
+            cache_key = self._location_cache_key(lead.url)
+            with _LOCATION_CACHE_LOCK:
+                cached = _LOCATION_CACHE.get(cache_key)
+            if cached:
+                lead.country = cached
+                lead.location = cached
+                resolved_count += 1
+                continue
+
+            try:
+                if driver is None:
+                    driver = self._get_driver()
+                    if (
+                        ensure_logged_in
+                        and not self._ensure_logged_in(driver)
+                    ):
+                        logger.warning(
+                            "Cannot enrich Upwork client locations "
+                            "without an authenticated session."
+                        )
+                        return
+                location = self._resolve_client_location(driver, lead.url)
+            except Exception as exc:
+                if self._is_browser_failure(exc):
+                    logger.warning(
+                        "Upwork location browser failed for %s: %s",
+                        lead.url,
+                        str(exc).splitlines()[0],
+                    )
+                    self._discard_driver()
+                    driver = None
+                else:
+                    logger.debug(
+                        "Upwork client location unavailable for %s: %s",
+                        lead.url,
+                        type(exc).__name__,
+                    )
+                unavailable_count += 1
+                continue
+
+            if not location:
+                unavailable_count += 1
+                continue
+            lead.country = location
+            lead.location = location
+            resolved_count += 1
+            with _LOCATION_CACHE_LOCK:
+                _LOCATION_CACHE[cache_key] = location
+        logger.info(
+            "Upwork detail locations: %d resolved, %d unavailable.",
+            resolved_count,
+            unavailable_count,
+        )
+
+    def _resolve_client_location(self, driver, url: str) -> str:
+        driver.get(url)
+        selector = ", ".join(CLIENT_LOCATION_SELECTORS)
+        timeout = max(
+            1,
+            getattr(self.config, "upwork_location_timeout", 12),
+        )
+        try:
+            WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+            )
+        except TimeoutException:
+            return ""
+        raw_location = self._first_text(
+            driver,
+            CLIENT_LOCATION_SELECTORS,
+        )
+        return self._clean_client_location(raw_location)
+
+    @staticmethod
+    def _location_cache_key(url: str) -> str:
+        if "upwork.com" not in (url or "").casefold():
+            return ""
+        match = re.search(r"(~\d+)", url)
+        return match.group(1) if match else url.split("?", 1)[0]
+
+    @staticmethod
+    def _clean_client_location(value: str) -> str:
+        """Return the country line from Upwork's location detail block."""
+        lines = [
+            line.strip()
+            for line in (value or "").splitlines()
+            if line.strip()
+        ]
+        return lines[0] if lines else ""
 
     def close(self):
         if self._driver:
@@ -204,8 +325,55 @@ class UpworkSeleniumScraper:
 
     def _scrape_keyword(self, keyword: str) -> list[JobLead]:
         driver = self._get_driver()
-
         if not self._ensure_logged_in(driver):
+            return []
+        locations = self._client_search_locations()
+        per_location_limit = max(
+            1,
+            (
+                self.config.max_results_per_keyword
+                + len(locations)
+                - 1
+            )
+            // len(locations),
+        )
+        leads: list[JobLead] = []
+        full_locations: list[str] = []
+        for client_location in locations:
+            location_results = self._scrape_keyword_location(
+                driver,
+                keyword,
+                client_location,
+                per_location_limit,
+            )
+            leads.extend(location_results)
+            if len(location_results) >= per_location_limit:
+                full_locations.append(client_location)
+
+        # If one country has fewer jobs, borrow its unused allowance from
+        # the other country instead of returning a needlessly short batch.
+        for client_location in full_locations:
+            shortfall = self.config.max_results_per_keyword - len(leads)
+            if shortfall <= 0:
+                break
+            leads.extend(
+                self._scrape_keyword_location(
+                    driver,
+                    keyword,
+                    client_location,
+                    shortfall,
+                )
+            )
+        return leads[:self.config.max_results_per_keyword]
+
+    def _scrape_keyword_location(
+        self,
+        driver,
+        keyword: str,
+        client_location: str,
+        result_limit: int,
+    ) -> list[JobLead]:
+        if driver is None:
             logger.error("Cannot scrape — login failed.")
             return []
 
@@ -213,13 +381,21 @@ class UpworkSeleniumScraper:
         reference = datetime.now(timezone.utc)
         previous_page_signature: tuple[str, ...] | None = None
         for page in range(1, max(1, self.config.page_limit) + 1):
-            feed_url = SEARCH_URL + "?" + urlencode({
+            params = {
                 "sort": "recency",
                 "q": keyword,
                 "page": page,
-                "per_page": min(50, self.config.max_results_per_keyword),
-            })
-            logger.info("Searching Upwork page %d: %s", page, feed_url)
+                "per_page": 50,
+            }
+            if client_location:
+                params["location"] = client_location
+            feed_url = SEARCH_URL + "?" + urlencode(params)
+            logger.info(
+                "Searching Upwork %s page %d: %s",
+                client_location or "all locations",
+                page,
+                feed_url,
+            )
             cards = self._load_jobs(
                 driver,
                 feed_url,
@@ -255,10 +431,15 @@ class UpworkSeleniumScraper:
             previous_page_signature = page_signature
 
             for job in parsed_page:
+                if client_location:
+                    job.location = client_location
+                    job.country = client_location
                 if job.url not in self._seen_ids:
                     self._seen_ids.add(job.url)
                     leads.append(job)
-            if len(leads) >= self.config.max_results_per_keyword:
+                    if len(leads) >= result_limit:
+                        break
+            if len(leads) >= result_limit:
                 break
             if self._reached_lookback_boundary(parsed_page, reference):
                 logger.info(
@@ -270,7 +451,31 @@ class UpworkSeleniumScraper:
                 )
                 break
 
-        return leads[:self.config.max_results_per_keyword]
+        return leads[:result_limit]
+
+    def _client_search_locations(self) -> list[str]:
+        """Return canonical client countries supported by Upwork search."""
+        if not self.config.target_locations:
+            return [""]
+        locations: list[str] = []
+        for target in self.config.target_locations:
+            normalized = target.casefold().strip()
+            if normalized in {
+                "us",
+                "u.s.",
+                "usa",
+                "u.s.a.",
+                "united states",
+                "united states of america",
+            }:
+                country = "United States"
+            elif normalized == "canada":
+                country = "Canada"
+            else:
+                continue
+            if country not in locations:
+                locations.append(country)
+        return locations or [""]
 
     def _reached_lookback_boundary(
         self,

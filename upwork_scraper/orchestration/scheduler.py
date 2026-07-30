@@ -5,8 +5,9 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 from threading import BoundedSemaphore
-from typing import Iterator
+from typing import Callable, Iterator
 
+from ..models import JobLead
 from ..platforms.base import PlatformAdapter
 from .events import KeywordResult, PlatformFinished
 
@@ -23,12 +24,16 @@ class PlatformScheduler:
         max_workers: int,
         max_browser_workers: int,
         queue_size: int,
+        process_leads: (
+            Callable[[str, str, list[JobLead]], int] | None
+        ) = None,
     ) -> None:
         self.adapters = adapters
         self.keywords = keywords
         self.max_workers = max(1, min(max_workers, len(adapters) or 1))
         self.max_browser_workers = max(1, max_browser_workers)
         self.queue_size = max(1, queue_size)
+        self.process_leads = process_leads
 
     def events(self) -> Iterator[SchedulerEvent]:
         queue: Queue[SchedulerEvent] = Queue(maxsize=self.queue_size)
@@ -44,10 +49,20 @@ class PlatformScheduler:
                         leads = adapter.scrape(keyword)
                 else:
                     leads = adapter.scrape(keyword)
+                qualified_count = (
+                    self.process_leads(adapter.name, keyword, leads)
+                    if self.process_leads is not None
+                    else 0
+                )
                 return KeywordResult(
                     platform_worker=adapter.name,
                     keyword=keyword,
-                    leads=leads,
+                    leads=[] if self.process_leads is not None else leads,
+                    scraped_count=len(leads),
+                    qualified_count=qualified_count,
+                    source_platform=(
+                        leads[0].platform if leads else ""
+                    ),
                 )
             except Exception as exc:
                 return KeywordResult(
@@ -60,13 +75,36 @@ class PlatformScheduler:
             try:
                 if adapter.scrape_many_fn is not None:
                     try:
-                        results = adapter.scrape_many(self.keywords)
+                        if adapter.resource_group == "browser":
+                            with browser_slots:
+                                results = adapter.scrape_many(self.keywords)
+                        else:
+                            results = adapter.scrape_many(self.keywords)
                         for keyword in self.keywords:
+                            leads = results.get(keyword, [])
+                            qualified_count = (
+                                self.process_leads(
+                                    adapter.name,
+                                    keyword,
+                                    leads,
+                                )
+                                if self.process_leads is not None
+                                else 0
+                            )
                             queue.put(
                                 KeywordResult(
                                     platform_worker=adapter.name,
                                     keyword=keyword,
-                                    leads=results.get(keyword, []),
+                                    leads=(
+                                        []
+                                        if self.process_leads is not None
+                                        else leads
+                                    ),
+                                    scraped_count=len(leads),
+                                    qualified_count=qualified_count,
+                                    source_platform=(
+                                        leads[0].platform if leads else ""
+                                    ),
                                 )
                             )
                     except Exception as exc:

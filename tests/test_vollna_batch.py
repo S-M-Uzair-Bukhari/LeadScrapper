@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import xml.etree.ElementTree as ET
+from unittest.mock import Mock
 
 from upwork_scraper.config import ScraperConfig
 from upwork_scraper.vollna import VollnaScraper
@@ -46,6 +48,29 @@ class VollnaBatchTests(unittest.TestCase):
         self.assertEqual(fetches[0], 1)
         self.assertEqual(len(results["web development"]), 1)
         self.assertEqual(len(results["marketing"]), 1)
+
+    def test_enriches_each_unique_upwork_job_once(self) -> None:
+        scraper = VollnaScraper(ScraperConfig())
+        resolver = Mock()
+        scraper._location_resolver = resolver
+        lead = scraper._extract_job(
+            ET.fromstring(
+                """
+                <item>
+                  <title>Qualified Upwork Project</title>
+                  <description>Need React development.</description>
+                  <link>https://www.upwork.com/jobs/~012345</link>
+                </item>
+                """
+            ),
+            "react",
+        )
+
+        scraper._enrich_locations([lead, lead])
+
+        resolver.enrich_client_locations.assert_called_once_with(
+            [lead]
+        )
 
 
 if __name__ == "__main__":

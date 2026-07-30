@@ -12,6 +12,9 @@ class KeywordResult:
     platform_worker: str
     keyword: str
     leads: list[JobLead] = field(default_factory=list)
+    scraped_count: int = 0
+    qualified_count: int = 0
+    source_platform: str = ""
     error: str = ""
 
 
