@@ -10,6 +10,7 @@ import json
 import logging
 from urllib.parse import urlencode
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Optional
 
 import undetected_chromedriver as uc
@@ -20,11 +21,12 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .config import ScraperConfig
-from .browser_cleanup import close_chrome_safely
+from .browser_cleanup import close_chrome_safely, discard_chrome_safely
 from .models import JobLead
 from .pipeline.recency_filter import RecencyFilter
 
 logger = logging.getLogger(__name__)
+_DRIVER_LAUNCH_LOCK = Lock()
 
 LOGIN_URL = "https://www.upwork.com/ab/account-security/login"
 SEARCH_URL = "https://www.upwork.com/nx/search/jobs/"
@@ -57,8 +59,22 @@ class UpworkSeleniumScraper:
     # ==================================================================
 
     def search_keyword(self, keyword: str) -> list[JobLead]:
-        leads = self._scrape_keyword(keyword)
-        return leads[:self.config.max_results_per_keyword]
+        for attempt in range(2):
+            try:
+                leads = self._scrape_keyword(keyword)
+                return leads[:self.config.max_results_per_keyword]
+            except Exception as exc:
+                if attempt == 0 and self._is_browser_failure(exc):
+                    logger.warning(
+                        "Upwork browser failed for '%s'; restarting its "
+                        "isolated browser and retrying once: %s",
+                        keyword,
+                        exc,
+                    )
+                    self._discard_driver()
+                    continue
+                raise
+        return []
 
     def close(self):
         if self._driver:
@@ -77,20 +93,48 @@ class UpworkSeleniumScraper:
                 return self._driver
             except Exception:
                 logger.info("Browser session lost, recreating...")
-                close_chrome_safely(self._driver)
-                self._driver = None
+                self._discard_driver()
         logger.info("Launching Chrome via undetected_chromedriver...")
-        options = uc.ChromeOptions()
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--start-maximized")
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            ChromeDriverManager().install()
-        except Exception:
-            pass
-        self._driver = uc.Chrome(version_main=150, options=options)
+        with _DRIVER_LAUNCH_LOCK:
+            options = uc.ChromeOptions()
+            options.add_argument(
+                "--disable-blink-features=AutomationControlled"
+            )
+            options.add_argument("--start-maximized")
+            try:
+                from webdriver_manager.chrome import ChromeDriverManager
+                ChromeDriverManager().install()
+            except Exception:
+                pass
+            self._driver = uc.Chrome(version_main=150, options=options)
         self._driver.set_page_load_timeout(120)
+        client_config = getattr(
+            self._driver.command_executor,
+            "_client_config",
+            None,
+        )
+        if client_config is not None:
+            client_config.timeout = self.config.selenium_command_timeout
         return self._driver
+
+    def _discard_driver(self) -> None:
+        driver = self._driver
+        self._driver = None
+        discard_chrome_safely(driver)
+
+    @staticmethod
+    def _is_browser_failure(exc: Exception) -> bool:
+        if isinstance(exc, WebDriverException):
+            return True
+        message = str(exc).casefold()
+        return (
+            "localhost" in message
+            and (
+                "timed out" in message
+                or "connection" in message
+                or "max retries" in message
+            )
+        )
 
     def _ensure_logged_in(self, driver: uc.Chrome) -> bool:
         username = self.config.upwork_username
@@ -295,6 +339,12 @@ class UpworkSeleniumScraper:
         posted = self._extract_posted_str(card)
         skills = self._extract_skills(card)
         budget, job_type, exp_level = self._extract_job_meta(raw_text)
+        client_location = self._first_text(card, [
+            "[data-test='client-country']",
+            "[data-test='client-location']",
+            "[data-test='location']",
+            "[data-qa='client-location']",
+        ])
 
         return JobLead(
             title=title,
@@ -307,6 +357,8 @@ class UpworkSeleniumScraper:
             experience_level=exp_level,
             platform="Upwork",
             keyword_searched=keyword,
+            location=client_location,
+            country=client_location,
         )
 
     def _first_link(self, card):

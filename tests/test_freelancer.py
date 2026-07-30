@@ -67,6 +67,27 @@ class FreelancerScraperTests(unittest.TestCase):
             "22 hours ago",
         )
 
+    def test_embedded_project_data_provides_client_country(self) -> None:
+        html = """
+        <script>
+          {"project": {
+            "client": {
+              "registrationTime": 123,
+              "address": {
+                "city": "Toronto",
+                "country": "Canada",
+                "countryCode": "ca"
+              }
+            }
+          }}
+        </script>
+        """
+
+        self.assertEqual(
+            FreelancerScraper._parse_client_country(html),
+            "Canada",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

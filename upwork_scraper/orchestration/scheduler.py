@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 from threading import BoundedSemaphore
 from typing import Iterator
@@ -14,7 +14,7 @@ SchedulerEvent = KeywordResult | PlatformFinished
 
 
 class PlatformScheduler:
-    """Run platforms concurrently and keywords sequentially per platform."""
+    """Run platforms concurrently with bounded keyword workers."""
 
     def __init__(
         self,
@@ -34,30 +34,75 @@ class PlatformScheduler:
         queue: Queue[SchedulerEvent] = Queue(maxsize=self.queue_size)
         browser_slots = BoundedSemaphore(self.max_browser_workers)
 
+        def scrape_keyword(
+            adapter: PlatformAdapter,
+            keyword: str,
+        ) -> KeywordResult:
+            try:
+                if adapter.resource_group == "browser":
+                    with browser_slots:
+                        leads = adapter.scrape(keyword)
+                else:
+                    leads = adapter.scrape(keyword)
+                return KeywordResult(
+                    platform_worker=adapter.name,
+                    keyword=keyword,
+                    leads=leads,
+                )
+            except Exception as exc:
+                return KeywordResult(
+                    platform_worker=adapter.name,
+                    keyword=keyword,
+                    error=str(exc),
+                )
+
         def run_platform(adapter: PlatformAdapter) -> None:
             try:
-                for keyword in self.keywords:
+                if adapter.scrape_many_fn is not None:
                     try:
-                        if adapter.resource_group == "browser":
-                            with browser_slots:
-                                leads = adapter.scrape(keyword)
-                        else:
-                            leads = adapter.scrape(keyword)
-                        queue.put(
-                            KeywordResult(
-                                platform_worker=adapter.name,
-                                keyword=keyword,
-                                leads=leads,
+                        results = adapter.scrape_many(self.keywords)
+                        for keyword in self.keywords:
+                            queue.put(
+                                KeywordResult(
+                                    platform_worker=adapter.name,
+                                    keyword=keyword,
+                                    leads=results.get(keyword, []),
+                                )
                             )
-                        )
                     except Exception as exc:
-                        queue.put(
-                            KeywordResult(
-                                platform_worker=adapter.name,
-                                keyword=keyword,
-                                error=str(exc),
+                        for keyword in self.keywords:
+                            queue.put(
+                                KeywordResult(
+                                    platform_worker=adapter.name,
+                                    keyword=keyword,
+                                    error=str(exc),
+                                )
                             )
-                        )
+                    return
+
+                workers = max(
+                    1,
+                    min(adapter.keyword_workers, len(self.keywords) or 1),
+                )
+                if workers == 1:
+                    for keyword in self.keywords:
+                        queue.put(scrape_keyword(adapter, keyword))
+                    return
+
+                with ThreadPoolExecutor(
+                    max_workers=workers,
+                    thread_name_prefix=f"{adapter.name}-keyword",
+                ) as keyword_executor:
+                    futures = {
+                        keyword_executor.submit(
+                            scrape_keyword,
+                            adapter,
+                            keyword,
+                        ): keyword
+                        for keyword in self.keywords
+                    }
+                    for future in as_completed(futures):
+                        queue.put(future.result())
             finally:
                 queue.put(PlatformFinished(adapter.name))
 

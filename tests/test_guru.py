@@ -17,6 +17,9 @@ class GuruScraperTests(unittest.TestCase):
           </h2>
           <div class="jobRecord__budget">Fixed Price</div>
           <div class="jobRecord__body">Build a web application.</div>
+          <p class="freelancerAvatar__subText">
+            <strong>United States</strong>
+          </p>
           <a href="/d/jobs/c/programming-development/">
             Programming &amp; Development
           </a>
@@ -35,6 +38,7 @@ class GuruScraperTests(unittest.TestCase):
             "https://www.guru.com/jobs/front-end-developer/2119835",
         )
         self.assertEqual(leads[0].job_id, "2119835")
+        self.assertEqual(leads[0].country, "United States")
 
 
 if __name__ == "__main__":

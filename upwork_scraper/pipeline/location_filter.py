@@ -1,4 +1,4 @@
-"""US, Canada, and remote lead filtering."""
+"""Strict platform-provided US and Canada client-location filtering."""
 
 from __future__ import annotations
 
@@ -55,14 +55,26 @@ class LocationFilter:
     def matches(
         self, lead: JobLead, analysis: LeadAnalysis | None = None
     ) -> bool:
-        sources: list[str] = []
-        if analysis and analysis.location not in ("", "Not Found"):
-            sources.append(analysis.location)
-        if lead.location not in ("", "Not Found"):
-            sources.append(lead.location)
+        # Trust only location metadata supplied by the platform. Description
+        # text may name a market or timezone without identifying the client.
+        sources = [
+            source
+            for source in (lead.country, lead.location)
+            if source not in ("", "Not Found")
+        ]
 
         for source in sources:
             value = source.casefold()
+            if value.strip() in {
+                "us",
+                "u.s.",
+                "usa",
+                "u.s.a.",
+                "united states",
+                "united states of america",
+                "canada",
+            }:
+                return True
             if any(pattern.search(value) for pattern in self._target_patterns):
                 return True
             if self._contains(value, US_STATES):
@@ -72,11 +84,4 @@ class LocationFilter:
             if self._contains(value, US_CA_CITIES):
                 return True
 
-        description = (lead.description or "").casefold()
-        if not description:
-            return False
-        if any(pattern.search(description) for pattern in self._target_patterns):
-            return True
-        if self._contains(description, US_STATES):
-            return True
-        return self._contains(description, CA_PROVINCES)
+        return False

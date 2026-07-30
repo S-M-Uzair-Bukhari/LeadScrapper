@@ -43,6 +43,26 @@ class VollnaScraper:
             xml_data, keyword
         )[:self.config.max_results_per_keyword]
 
+    def search_keywords(
+        self,
+        keywords: list[str],
+    ) -> dict[str, list[JobLead]]:
+        """Fetch RSS once, then filter the same payload for every keyword."""
+        logger.info(
+            "Vollna: fetching %s once for %d keywords",
+            VOLLNA_RSS_URL,
+            len(keywords),
+        )
+        xml_data = self._fetch(VOLLNA_RSS_URL)
+        if not xml_data:
+            return {keyword: [] for keyword in keywords}
+        return {
+            keyword: self._parse_jobs(xml_data, keyword)[
+                :self.config.max_results_per_keyword
+            ]
+            for keyword in keywords
+        }
+
     def _fetch(self, url: str) -> Optional[str]:
         for attempt in range(1, self.config.max_retries + 1):
             try:
@@ -111,6 +131,15 @@ class VollnaScraper:
         desc_clean = re.sub(
             r"\s*Categories:.*", "", desc_clean, flags=re.DOTALL
         ).strip()
+        location = ""
+        location_match = re.search(
+            r"(?:Client Country|Country|Location)\s*:\s*"
+            r"([^\n\r<]+)",
+            description_cdata,
+            re.IGNORECASE,
+        )
+        if location_match:
+            location = location_match.group(1).strip()
 
         # Extract budget from title e.g. "(Fixed Price: 2,000 USD)"
         budget = ""
@@ -142,7 +171,7 @@ class VollnaScraper:
             title=title_clean,
             company_client="Upwork Client",
             platform="Upwork (Vollna)",
-            location="",
+            location=location,
             job_type="",
             budget=budget,
             posted_date=pub_date,
@@ -150,7 +179,7 @@ class VollnaScraper:
             description=desc_clean[:5000] if desc_clean else "",
             skills_required=skills,
             experience_level="",
-            country="",
+            country=location,
             valid_job="Yes",
             job_id=title_clean,
             keyword_searched=keyword,

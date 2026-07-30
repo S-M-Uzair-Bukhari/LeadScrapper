@@ -229,17 +229,21 @@ class StructuralPipelineTests(unittest.TestCase):
         self.assertTrue(deduplicator.accept(first))
         self.assertFalse(deduplicator.accept(duplicate))
 
-    def test_accepts_remote_lead(self) -> None:
+    def test_accepts_explicit_us_lead(self) -> None:
         processor = LeadProcessor(
             analyzer=_AnalyzerStub(),
             deduplicator=RunDeduplicator(),
             location_filter=LocationFilter(
-                ["United States", "Canada", "Remote"]
+                ["United States", "Canada"]
             ),
         )
 
         result = processor.process(
-            JobLead(title="Build a dashboard", description="Relevant project")
+            JobLead(
+                title="Build a dashboard",
+                location="United States",
+                description="Relevant project",
+            )
         )
 
         self.assertIsNotNone(result)
@@ -249,15 +253,43 @@ class StructuralPipelineTests(unittest.TestCase):
             analyzer=_AnalyzerStub(location="London, United Kingdom"),
             deduplicator=RunDeduplicator(),
             location_filter=LocationFilter(
-                ["United States", "Canada", "Remote"]
+                ["United States", "Canada"]
             ),
         )
 
         result = processor.process(
-            JobLead(title="Build an API", description="Onsite in London")
+            JobLead(
+                title="Build an API",
+                location="United Kingdom",
+                description="Onsite in London",
+            )
         )
 
         self.assertIsNone(result)
+
+    def test_strict_location_rejects_non_client_location_signals(self) -> None:
+        location_filter = LocationFilter(["United States", "Canada"])
+
+        for location in ("Worldwide", "Remote", "India", ""):
+            with self.subTest(location=location):
+                self.assertFalse(
+                    location_filter.matches(
+                        JobLead(
+                            title="Lead",
+                            location=location,
+                            description=(
+                                "Serving customers in the United States "
+                                "and working Eastern Time."
+                            ),
+                        )
+                    )
+                )
+
+        self.assertTrue(
+            location_filter.matches(
+                JobLead(title="Canadian Lead", country="Canada")
+            )
+        )
 
     def test_sheets_upload_triggers_at_five_eligible_leads(self) -> None:
         writer = _SheetsWriterProbe()
@@ -414,6 +446,7 @@ class StructuralPipelineTests(unittest.TestCase):
                     JobLead(
                         title=f"{keyword.title()} Developer",
                         platform="Test Platform",
+                        location="United States",
                         description=(
                             "Location: Remote. We need web development services."
                         ),

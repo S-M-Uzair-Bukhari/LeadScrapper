@@ -267,6 +267,8 @@ class ScraperConfig:
     max_retries: int = 3
     max_platform_workers: int = 4
     max_browser_workers: int = 2
+    upwork_keyword_workers: int = 2
+    http_keyword_workers: int = 3
     event_queue_size: int = 100
 
     # Daily adaptive run policy
@@ -290,7 +292,7 @@ class ScraperConfig:
 
     # Target locations — only keep leads matching these (empty = keep all)
     target_locations: list[str] = field(default_factory=lambda: [
-        "United States", "USA", "U.S.", "US", "Canada", "CA", "Remote", "Americas",
+        "United States", "Canada",
     ])
 
     # Output
@@ -314,6 +316,7 @@ class ScraperConfig:
     upwork_username: str = os.getenv("UPWORK_USERNAME", "")
     upwork_password: str = os.getenv("UPWORK_PASSWORD", "")
     selenium_max_scrolls: int = 8
+    selenium_command_timeout: float = 45.0
 
     # Bark.com
     bark_username: str = os.getenv("BARK_USERNAME", "")

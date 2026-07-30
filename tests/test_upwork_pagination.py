@@ -110,6 +110,32 @@ class UpworkPaginationTests(unittest.TestCase):
         self.assertEqual(calls[0], 2)
         self.assertEqual(len(leads), 1)
 
+    def test_restarts_browser_once_after_local_driver_timeout(self) -> None:
+        scraper = UpworkSeleniumScraper(ScraperConfig())
+        calls = [0]
+        resets = [0]
+
+        def scrape(_: str) -> list[JobLead]:
+            calls[0] += 1
+            if calls[0] == 1:
+                raise RuntimeError(
+                    "HTTPConnectionPool(host='localhost', port=51781): "
+                    "Read timed out"
+                )
+            return [JobLead(title="Recovered")]
+
+        scraper._scrape_keyword = scrape
+        scraper._discard_driver = lambda: resets.__setitem__(
+            0,
+            resets[0] + 1,
+        )
+
+        leads = scraper.search_keyword("marketing")
+
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(calls[0], 2)
+        self.assertEqual(resets[0], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

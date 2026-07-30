@@ -37,6 +37,9 @@ class FreelancerScraper:
     def __init__(self) -> None:
         self._session = cffi_requests.Session(impersonate="chrome")
 
+    def close(self) -> None:
+        self._session.close()
+
     def _pick_category(self, keyword: str) -> str:
         kw = keyword.lower().strip()
         if kw in FREELANCER_CATEGORIES:
@@ -131,6 +134,18 @@ class FreelancerScraper:
         return relative_time.text(strip=True) if relative_time else ""
 
     @staticmethod
+    def _parse_client_country(html: str) -> str:
+        """Extract the project owner's country from embedded project data."""
+        match = re.search(
+            r'"client"\s*:\s*\{[^{}]*'
+            r'"address"\s*:\s*\{[^{}]*'
+            r'"country"\s*:\s*"([^"]+)"',
+            html,
+            re.DOTALL,
+        )
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
     def _format_relative_age(age_seconds: float) -> str:
         if age_seconds < 60:
             amount = max(1, round(age_seconds))
@@ -148,9 +163,9 @@ class FreelancerScraper:
         return f"{amount} {unit}{suffix} ago"
 
     @classmethod
-    def _fetch_posted_date(cls, job_url: str) -> str:
+    def _fetch_detail_metadata(cls, job_url: str) -> tuple[str, str]:
         if not job_url:
-            return ""
+            return "", ""
         try:
             response = cffi_requests.get(
                 job_url,
@@ -167,15 +182,23 @@ class FreelancerScraper:
                     response.status_code,
                     job_url,
                 )
-                return ""
-            return cls._parse_posted_date(response.text)
+                return "", ""
+            return (
+                cls._parse_posted_date(response.text),
+                cls._parse_client_country(response.text),
+            )
         except Exception as exc:
             logger.warning(
                 "Freelancer detail request failed for %s: %s",
                 job_url,
                 exc,
             )
-            return ""
+            return "", ""
+
+    @classmethod
+    def _fetch_posted_date(cls, job_url: str) -> str:
+        """Backward-compatible posting-date-only detail helper."""
+        return cls._fetch_detail_metadata(job_url)[0]
 
     def _populate_posted_dates(self, leads: list[JobLead]) -> None:
         """Fetch detail dates concurrently without changing result order."""
@@ -184,11 +207,18 @@ class FreelancerScraper:
         workers = min(5, len(leads))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(self._fetch_posted_date, lead.url): lead
+                executor.submit(
+                    self._fetch_detail_metadata,
+                    lead.url,
+                ): lead
                 for lead in leads
             }
             for future in as_completed(futures):
-                futures[future].posted_date = future.result()
+                lead = futures[future]
+                posted_date, client_country = future.result()
+                lead.posted_date = posted_date
+                lead.location = client_country
+                lead.country = client_country
 
     def scrape(
         self,

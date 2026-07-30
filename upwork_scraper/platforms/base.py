@@ -16,9 +16,18 @@ class PlatformAdapter:
     scrape_fn: Callable[[str], list[JobLead]]
     close_fn: Callable[[], None] | None = None
     resource_group: str = "http"
+    keyword_workers: int = 1
+    scrape_many_fn: (
+        Callable[[list[str]], dict[str, list[JobLead]]] | None
+    ) = None
 
     def scrape(self, keyword: str) -> list[JobLead]:
         return self.scrape_fn(keyword)
+
+    def scrape_many(self, keywords: list[str]) -> dict[str, list[JobLead]]:
+        if self.scrape_many_fn is None:
+            return {keyword: self.scrape(keyword) for keyword in keywords}
+        return self.scrape_many_fn(keywords)
 
     def close(self) -> None:
         if self.close_fn is not None:

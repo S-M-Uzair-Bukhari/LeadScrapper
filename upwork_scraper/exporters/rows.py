@@ -66,7 +66,7 @@ def processed_lead_to_row(
         "Decision-Maker Title": analysis.decision_maker_title,
         "Budget": analysis.budget if analysis._found_budget else lead.budget,
         "Timeline": analysis.timeline,
-        "Location": analysis.location or lead.location,
+        "Location": lead.location or lead.country or analysis.location,
         "Industry": analysis.industry,
         "Technologies": analysis.technologies or lead.skills_required,
         "Services Required": analysis.services_required,

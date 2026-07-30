@@ -274,6 +274,14 @@ class UpworkScraper:
             a.text(strip=True)
             for a in tile.css("a[data-qa='legacy-skill']")[:6]
         ]
+        location_el = tile.css_first(
+            "[data-qa='client-location'], "
+            "[data-qa='client-country'], "
+            "[data-test='location']"
+        )
+        client_location = (
+            location_el.text(strip=True) if location_el else ""
+        )
 
         return JobLead(
             title=title,
@@ -284,6 +292,8 @@ class UpworkScraper:
             platform="Upwork",
             keyword_searched=keyword,
             skills_required=", ".join(skills) if skills else "",
+            location=client_location,
+            country=client_location,
         )
 
     def _parse_search_page(self, tree: HTMLParser, keyword: str) -> list[JobLead]:
@@ -319,6 +329,14 @@ class UpworkScraper:
 
         exp_el = card.css_first("li[data-test='experience-level'] strong")
         exp = exp_el.text(strip=True) if exp_el is not None else ""
+        location_el = card.css_first(
+            "[data-test='client-country'], "
+            "[data-test='client-location'], "
+            "[data-test='location']"
+        )
+        client_location = (
+            location_el.text(strip=True) if location_el else ""
+        )
 
         return JobLead(
             title=title,
@@ -329,6 +347,8 @@ class UpworkScraper:
             platform="Upwork",
             keyword_searched=keyword,
             experience_level=exp,
+            location=client_location,
+            country=client_location,
         )
 
     # ==================================================================

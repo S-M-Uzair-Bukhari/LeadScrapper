@@ -1,7 +1,7 @@
 # Multi-Platform Lead Generator
 
 A Python CLI that collects job leads from Upwork, Vollna, Freelancer, Guru,
-and Bark, qualifies them, keeps US/Canada/Remote opportunities, and exports
+and Bark, qualifies them, keeps explicitly identified US/Canada opportunities, and exports
 the results to CSV/JSON and optionally Google Sheets.
 
 ## Architecture
@@ -34,7 +34,7 @@ PlatformScheduler
                                |
                        analyze and score
                                |
-                    US/Canada/Remote filter
+                    strict US/Canada client filter
                                |
                 +--------------+--------------+
                 |                             |
@@ -44,17 +44,17 @@ PlatformScheduler
                                       upload every 10
                                               |
                                               v
-                                  platform + dated tabs
+                                  unified Leads tab
                 |
                 v
         final CSV or JSON
 ```
 
-Platforms run concurrently with a bounded worker pool. Within each platform,
-keywords are processed sequentially so that existing HTTP sessions, browser
-sessions, login state, and scraper-level deduplication continue to behave as
-before. Browser-capable adapters also share a separate bounded semaphore so
-that Chrome sessions do not grow without limit.
+Platforms run concurrently with a bounded worker pool. Upwork Selenium uses
+two keyword workers with isolated Chrome/ChromeDriver sessions. Freelancer
+and Guru use three keyword workers with separate scraper sessions. The global
+browser semaphore still permits at most two simultaneous browsers. Vollna
+fetches its RSS feed once per run and filters every keyword locally.
 
 The platform scraper implementations retain their original selectors,
 requests, parsing, login, and fallback behavior. The adapter layer only gives
@@ -67,7 +67,7 @@ For every keyword result:
 1. Convert platform output to the shared `JobLead` model.
 2. Remove duplicate titles across the current run.
 3. Extract business information and calculate the lead score.
-4. Keep only US, Canada, or Remote leads.
+4. Keep only leads whose platform-provided client location is US or Canada.
 5. Save the qualified lead to `data/leads.db`.
 6. Add it to the platform's Google Sheets buffer.
 7. Upload when that buffer reaches 10 leads.
@@ -98,7 +98,7 @@ upwork_scraper/
 |-- pipeline/
 |   |-- processor.py           processing stage coordinator
 |   |-- deduplicator.py        thread-safe run deduplication
-|   `-- location_filter.py     US/Canada/Remote filtering
+|   `-- location_filter.py     strict platform client-country filtering
 |
 |-- storage/
 |   `-- sqlite_repository.py   durable qualified-lead checkpoints
@@ -218,6 +218,8 @@ The main structural settings are in `ScraperConfig`:
 |---|---:|---|
 | `max_platform_workers` | `4` | Maximum platform workers running concurrently |
 | `max_browser_workers` | `2` | Maximum browser-capable searches running concurrently |
+| `upwork_keyword_workers` | `2` | Isolated Selenium keyword/browser workers |
+| `http_keyword_workers` | `3` | Keyword workers for Freelancer and Guru |
 | `event_queue_size` | `100` | Maximum keyword-result batches awaiting processing |
 | `max_results_per_keyword` | `50` | Result cap returned by each platform search |
 | `google_sheet_tab` | `Leads` | Single worksheet receiving every platform |

@@ -34,6 +34,9 @@ class GuruScraper:
     def __init__(self) -> None:
         self._session = cffi_requests.Session(impersonate="chrome")
 
+    def close(self) -> None:
+        self._session.close()
+
     def _pick_skill(self, keyword: str) -> str:
         kw = keyword.lower().strip()
         if kw in GURU_SKILLS:
@@ -61,6 +64,12 @@ class GuruScraper:
 
             skill_els = rec.css(".jobRecord__skills a, [class*=skill] a")
             skills = [s.text(strip=True) for s in skill_els if s.text(strip=True)]
+            location_el = rec.css_first(
+                ".freelancerAvatar__subText strong"
+            )
+            client_country = (
+                location_el.text(strip=True) if location_el else ""
+            )
 
             # Guru places the canonical job-detail link inside the title.
             # Other links in the record point to category pages under
@@ -84,7 +93,7 @@ class GuruScraper:
                 title=title,
                 company_client="Guru Client",
                 platform="Guru",
-                location="",
+                location=client_country,
                 job_type="",
                 budget=budget,
                 posted_date=posted,
@@ -92,7 +101,7 @@ class GuruScraper:
                 description=description[:500],
                 skills_required=", ".join(skills) if skills else "",
                 experience_level="",
-                country="",
+                country=client_country,
                 valid_job="Yes",
                 job_id=job_id_match.group(1) if job_id_match else "",
             )

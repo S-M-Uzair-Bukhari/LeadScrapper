@@ -113,7 +113,9 @@ class LeadEngine:
             f"Execution: [cyan]{self.config.max_platform_workers} "
             "platform workers; "
             f"{self.config.max_browser_workers} browser slots; "
-            "keywords sequential per platform[/cyan]"
+            f"{self.config.upwork_keyword_workers} Upwork keyword workers; "
+            f"{self.config.http_keyword_workers} HTTP keyword workers/platform"
+            "[/cyan]"
         )
         console.print(
             f"Sheets batch: [cyan]{self.config.sheets_batch_size} "
