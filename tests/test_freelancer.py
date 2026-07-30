@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 
 from upwork_scraper.freelancer import FreelancerScraper
+from upwork_scraper.models import JobLead
 
 
 class FreelancerScraperTests(unittest.TestCase):
@@ -86,6 +87,23 @@ class FreelancerScraperTests(unittest.TestCase):
         self.assertEqual(
             FreelancerScraper._parse_client_country(html),
             "Canada",
+        )
+
+    def test_filters_returned_leads_to_us_and_canada(self) -> None:
+        scraper = FreelancerScraper(["United States", "Canada"])
+        try:
+            leads = scraper._target_leads([
+                JobLead(title="US", country="United States"),
+                JobLead(title="CA", country="Canada"),
+                JobLead(title="India", country="India"),
+                JobLead(title="Unknown"),
+            ])
+        finally:
+            scraper.close()
+
+        self.assertEqual(
+            [lead.title for lead in leads],
+            ["US", "CA"],
         )
 
 

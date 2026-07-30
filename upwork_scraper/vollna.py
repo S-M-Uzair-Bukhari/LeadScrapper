@@ -16,6 +16,7 @@ from curl_cffi import requests as cffi_requests
 
 from .config import ScraperConfig
 from .models import JobLead
+from .pipeline.location_filter import LocationFilter
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,9 @@ class VollnaScraper:
         )
         self._seen_titles: set[str] = set()
         self._location_resolver = None
+        self._location_filter = LocationFilter(
+            self.config.target_locations
+        )
 
     def search_keyword(self, keyword: str) -> list[JobLead]:
         """Fetch jobs from Vollna RSS feed filtered by keyword."""
@@ -44,7 +48,7 @@ class VollnaScraper:
             xml_data, keyword
         )[:self.config.max_results_per_keyword]
         self._enrich_locations(leads)
-        return leads
+        return self._target_leads(leads)
 
     def search_keywords(
         self,
@@ -72,7 +76,19 @@ class VollnaScraper:
             if lead.url
         }
         self._enrich_locations(list(unique_leads.values()))
-        return results
+        return {
+            keyword: self._target_leads(leads)
+            for keyword, leads in results.items()
+        }
+
+    def _target_leads(self, leads: list[JobLead]) -> list[JobLead]:
+        if not self.config.target_locations:
+            return leads
+        return [
+            lead
+            for lead in leads
+            if self._location_filter.matches(lead)
+        ]
 
     def _enrich_locations(self, leads: list[JobLead]) -> None:
         unresolved = list({

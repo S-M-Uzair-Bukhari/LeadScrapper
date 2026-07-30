@@ -11,6 +11,7 @@ from curl_cffi import requests as cffi_requests
 from selectolax.parser import HTMLParser
 
 from .models import JobLead
+from .pipeline.location_filter import LocationFilter
 from .pipeline.recency_filter import RecencyFilter
 
 logger = logging.getLogger(__name__)
@@ -34,8 +35,17 @@ BASE_URL = "https://www.freelancer.com"
 
 
 class FreelancerScraper:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        target_locations: list[str] | None = None,
+    ) -> None:
         self._session = cffi_requests.Session(impersonate="chrome")
+        self._target_locations = (
+            ["United States", "Canada"]
+            if target_locations is None
+            else target_locations
+        )
+        self._location_filter = LocationFilter(self._target_locations)
 
     def close(self) -> None:
         self._session.close()
@@ -220,6 +230,15 @@ class FreelancerScraper:
                 lead.location = client_country
                 lead.country = client_country
 
+    def _target_leads(self, leads: list[JobLead]) -> list[JobLead]:
+        if not self._target_locations:
+            return leads
+        return [
+            lead
+            for lead in leads
+            if self._location_filter.matches(lead)
+        ]
+
     def scrape(
         self,
         keyword: str,
@@ -260,7 +279,8 @@ class FreelancerScraper:
                     if len(leads) + len(new_page_leads) >= max_results:
                         break
             self._populate_posted_dates(new_page_leads)
-            leads.extend(new_page_leads)
+            target_page_leads = self._target_leads(new_page_leads)
+            leads.extend(target_page_leads)
             if (
                 len(leads) >= max_results
                 or not page_leads

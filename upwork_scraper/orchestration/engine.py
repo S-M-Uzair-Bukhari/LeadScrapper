@@ -18,7 +18,6 @@ from ..exporters.schema import PLATFORM_SHEET_MAP
 from ..exporters.sheets import SheetsBatchWriter
 from ..models import JobLead
 from ..pipeline.deduplicator import RunDeduplicator
-from ..pipeline.location_filter import LocationFilter
 from ..pipeline.processor import LeadProcessor, ProcessedLead
 from ..pipeline.recency_filter import RecencyFilter
 from ..platforms.registry import build_platform_adapters
@@ -227,7 +226,6 @@ class LeadEngine:
             processor = LeadProcessor(
                 LeadAnalyzer(),
                 self._deduplicator,
-                LocationFilter(self.config.target_locations),
                 RecencyFilter(
                     self.run_policy.recency_hours,
                     keep_unknown=self.config.keep_unknown_posted_dates,

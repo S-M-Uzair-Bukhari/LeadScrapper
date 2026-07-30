@@ -30,7 +30,7 @@ RSS = """\
 
 class VollnaBatchTests(unittest.TestCase):
     def test_fetches_feed_once_for_all_keywords(self) -> None:
-        scraper = VollnaScraper(ScraperConfig())
+        scraper = VollnaScraper(ScraperConfig(target_locations=[]))
         fetches = [0]
 
         def fetch(_: str) -> str:
@@ -71,6 +71,39 @@ class VollnaBatchTests(unittest.TestCase):
         resolver.enrich_client_locations.assert_called_once_with(
             [lead]
         )
+
+    def test_filters_resolved_leads_to_us_and_canada(self) -> None:
+        scraper = VollnaScraper(ScraperConfig())
+        try:
+            us = scraper._extract_job(
+                ET.fromstring(
+                    """
+                    <item>
+                      <title>United States Project</title>
+                      <description>Location: United States</description>
+                    </item>
+                    """
+                ),
+                "project",
+            )
+            uk = scraper._extract_job(
+                ET.fromstring(
+                    """
+                    <item>
+                      <title>United Kingdom Project</title>
+                      <description>Location: United Kingdom</description>
+                    </item>
+                    """
+                ),
+                "project",
+            )
+            leads = scraper._target_leads([us, uk])
+        finally:
+            scraper.close()
+
+        self.assertEqual([lead.title for lead in leads], [
+            "United States Project"
+        ])
 
 
 if __name__ == "__main__":

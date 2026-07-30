@@ -233,9 +233,6 @@ class StructuralPipelineTests(unittest.TestCase):
         processor = LeadProcessor(
             analyzer=_AnalyzerStub(),
             deduplicator=RunDeduplicator(),
-            location_filter=LocationFilter(
-                ["United States", "Canada"]
-            ),
         )
 
         result = processor.process(
@@ -248,13 +245,10 @@ class StructuralPipelineTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
 
-    def test_rejects_non_target_location(self) -> None:
+    def test_processor_does_not_reject_non_target_location(self) -> None:
         processor = LeadProcessor(
             analyzer=_AnalyzerStub(location="London, United Kingdom"),
             deduplicator=RunDeduplicator(),
-            location_filter=LocationFilter(
-                ["United States", "Canada"]
-            ),
         )
 
         result = processor.process(
@@ -265,7 +259,7 @@ class StructuralPipelineTests(unittest.TestCase):
             )
         )
 
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
 
     def test_strict_location_rejects_non_client_location_signals(self) -> None:
         location_filter = LocationFilter(["United States", "Canada"])

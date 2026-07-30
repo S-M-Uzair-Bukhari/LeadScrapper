@@ -85,7 +85,9 @@ def build_platform_adapters(config: ScraperConfig) -> dict[str, PlatformAdapter]
         )
 
     if "freelancer" in resolved_platforms:
-        pool = _ThreadLocalScraperPool(FreelancerScraper)
+        pool = _ThreadLocalScraperPool(
+            lambda: FreelancerScraper(config.target_locations)
+        )
         adapters["freelancer"] = PlatformAdapter(
             "freelancer",
             lambda keyword, worker_pool=pool: worker_pool.get().scrape(
@@ -99,7 +101,9 @@ def build_platform_adapters(config: ScraperConfig) -> dict[str, PlatformAdapter]
         )
 
     if "guru" in resolved_platforms:
-        pool = _ThreadLocalScraperPool(GuruScraper)
+        pool = _ThreadLocalScraperPool(
+            lambda: GuruScraper(config.target_locations)
+        )
         adapters["guru"] = PlatformAdapter(
             "guru",
             lambda keyword, worker_pool=pool: worker_pool.get().scrape(

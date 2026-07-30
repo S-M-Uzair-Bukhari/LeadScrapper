@@ -278,7 +278,7 @@ class ScraperConfig:
     first_daily_run_results: int = 50
     first_daily_run_pages: int = 3
     later_daily_run_results: int = 20
-    later_daily_run_pages: int = 2
+    later_daily_run_pages: int = 3
     first_daily_run_recency_hours: float = 14.0
     catch_up_after_hours: float = 14.0
     catch_up_max_results_per_keyword: int = 1000

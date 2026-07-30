@@ -3,6 +3,7 @@
 import unittest
 
 from upwork_scraper.guru import GuruScraper
+from upwork_scraper.models import JobLead
 
 
 class GuruScraperTests(unittest.TestCase):
@@ -39,6 +40,18 @@ class GuruScraperTests(unittest.TestCase):
         )
         self.assertEqual(leads[0].job_id, "2119835")
         self.assertEqual(leads[0].country, "United States")
+
+    def test_filters_returned_leads_to_us_and_canada(self) -> None:
+        scraper = GuruScraper(["United States", "Canada"])
+        try:
+            leads = scraper._target_leads([
+                JobLead(title="Toronto", country="Canada"),
+                JobLead(title="London", country="United Kingdom"),
+            ])
+        finally:
+            scraper.close()
+
+        self.assertEqual([lead.title for lead in leads], ["Toronto"])
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 # Multi-Platform Lead Generator
 
-A Python CLI that collects job leads from Upwork, Vollna, Freelancer, Guru,
-and Bark, qualifies them, keeps explicitly identified US/Canada opportunities, and exports
-the results to CSV/JSON and optionally Google Sheets.
+A Python CLI that collects US/Canada client leads from Upwork, Vollna,
+Freelancer, and Guru, analyzes them, and exports the results to CSV/JSON and
+optionally Google Sheets.
 
 ## Architecture
 
@@ -55,7 +55,10 @@ missing. Resolved countries are cached by Upwork job ID across both sources.
 Upwork searches are prefiltered at the source with separate client-location
 queries for `United States` and `Canada`. The per-keyword result allowance is
 divided between both countries, and each request asks for 50 jobs per page.
-The strict local location filter still validates every result before saving.
+The central processing pipeline does not perform a second country rejection.
+Upwork is restricted by its search query; Freelancer and Guru filter their
+platform country metadata before returning; Vollna resolves its linked
+Upwork client country and filters before analysis.
 
 The platform scraper implementations retain their original selectors,
 requests, parsing, login, and fallback behavior. The adapter layer only gives
@@ -70,8 +73,7 @@ For every keyword result, the nested keyword worker:
 3. Extract business information and calculate the lead score.
 4. Trust Upwork's server-side client-country query when present; otherwise
    resolve missing Upwork/Vollna countries from authenticated detail pages.
-5. Apply the strict local US/Canada check.
-6. Put each accepted lead into its platform's bounded output queue.
+5. Put each accepted lead into its platform's bounded output queue.
 
 Each platform output worker then saves its leads to `data/leads.db` and adds
 them to the shared Google Sheets buffer. The buffer uploads every 5 eligible
@@ -103,7 +105,7 @@ upwork_scraper/
 |-- pipeline/
 |   |-- processor.py           processing stage coordinator
 |   |-- deduplicator.py        thread-safe run deduplication
-|   `-- location_filter.py     strict platform client-country filtering
+|   `-- location_filter.py     retained location-matching utility (not active)
 |
 |-- storage/
 |   `-- sqlite_repository.py   durable qualified-lead checkpoints
