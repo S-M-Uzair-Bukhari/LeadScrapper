@@ -228,7 +228,12 @@ class LeadEngine:
                 self._deduplicator,
                 RecencyFilter(
                     self.run_policy.recency_hours,
-                    keep_unknown=self.config.keep_unknown_posted_dates,
+                    keep_unknown=(
+                        self.config.keep_unknown_posted_dates
+                        if self.run_policy.is_catch_up
+                        else self.config.normal_keep_unknown_posted_dates
+                    ),
+                    strict_date_only=not self.run_policy.is_catch_up,
                 ),
             )
             self._processor_local.processor = processor

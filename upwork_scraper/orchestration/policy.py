@@ -31,7 +31,7 @@ class DailyRunPolicy:
                 run_number=run_number,
                 max_results_per_keyword=config.max_results_per_keyword,
                 page_limit=config.page_limit,
-                recency_hours=None,
+                recency_hours=config.later_daily_run_recency_hours,
             )
         needs_catch_up = (
             config.force_catch_up
@@ -53,5 +53,5 @@ class DailyRunPolicy:
             run_number=run_number,
             max_results_per_keyword=config.later_daily_run_results,
             page_limit=config.later_daily_run_pages,
-            recency_hours=None,
+            recency_hours=config.later_daily_run_recency_hours,
         )

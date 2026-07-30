@@ -251,7 +251,7 @@ such as `America/New_York`.
 | Daily run | Jobs per keyword | Page/scroll limit | Posted-time behavior |
 |---|---:|---:|---|
 | First or catch-up run | Up to 1,000 | Up to 100 | Continue until reaching jobs older than 14 hours |
-| Later runs | 20 | 2 | Keep newest-first platform results |
+| Later normal runs | 20 | 3 | Keep only jobs posted within the last 2 hours |
 
 A catch-up run is selected for the first run of the local day or whenever at
 least 14 hours have elapsed since the last successfully completed run. Started
@@ -259,6 +259,10 @@ or aborted runs do not suppress catch-up mode. The window means “not older
 than 14 hours.” The high result/page limits are safety ceilings: paginated
 scrapers stop earlier when a newest-first page reaches the lookback boundary
 or the platform has no more results.
+
+Normal runs reject missing or unparseable posting dates so an unknown-age job
+cannot bypass the 2-hour limit. Catch-up runs retain their existing behavior
+of keeping unknown posting dates when a platform does not expose a usable age.
 
 Platform mapping:
 

@@ -26,6 +26,10 @@ class ScraperConfig:
         "SEO",
         "Social Media Marketing",
         "CMS development",
+        "AI Automation", 
+        "SaaS Development",
+        "IT Solution provider",
+        "ui design",
         # High-Intent Buyer Keywords (Most Valuable)
         # "hire react native developer",
         # "hire react developer",
@@ -279,11 +283,13 @@ class ScraperConfig:
     first_daily_run_pages: int = 3
     later_daily_run_results: int = 20
     later_daily_run_pages: int = 3
+    later_daily_run_recency_hours: float = 2.0
     first_daily_run_recency_hours: float = 14.0
     catch_up_after_hours: float = 14.0
     catch_up_max_results_per_keyword: int = 1000
     catch_up_max_pages: int = 100
     keep_unknown_posted_dates: bool = True
+    normal_keep_unknown_posted_dates: bool = False
     # Runtime value set by LeadEngine for age-aware platform pagination.
     collection_recency_hours: float | None = None
     local_timezone: str = os.getenv("SCRAPER_TIMEZONE", "Asia/Karachi")

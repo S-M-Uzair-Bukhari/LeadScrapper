@@ -123,8 +123,8 @@ class StructuralPipelineTests(unittest.TestCase):
         self.assertEqual(first.recency_hours, 14.0)
         self.assertTrue(first.is_catch_up)
         self.assertEqual(later.max_results_per_keyword, 20)
-        self.assertEqual(later.page_limit, 2)
-        self.assertIsNone(later.recency_hours)
+        self.assertEqual(later.page_limit, 3)
+        self.assertEqual(later.recency_hours, 2.0)
         self.assertFalse(later.is_catch_up)
 
     def test_daily_policy_catches_up_after_fourteen_hour_gap(self) -> None:
@@ -215,6 +215,45 @@ class StructuralPipelineTests(unittest.TestCase):
             )
         )
         self.assertTrue(
+            recency_filter.matches(
+                JobLead(title="Unknown", posted_date="6 days left"),
+                now,
+            )
+        )
+
+    def test_normal_run_recency_filter_enforces_two_hour_limit(self) -> None:
+        recency_filter = RecencyFilter(
+            2,
+            keep_unknown=False,
+            strict_date_only=True,
+        )
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+
+        self.assertTrue(
+            recency_filter.matches(
+                JobLead(
+                    title="Recent ISO",
+                    posted_date="2026-07-30T10:30:00+00:00",
+                ),
+                now,
+            )
+        )
+        self.assertFalse(
+            recency_filter.matches(
+                JobLead(
+                    title="Old ISO",
+                    posted_date="2026-07-30T09:30:00+00:00",
+                ),
+                now,
+            )
+        )
+        self.assertFalse(
+            recency_filter.matches(
+                JobLead(title="Old date", posted_date="2026-07-30"),
+                now,
+            )
+        )
+        self.assertFalse(
             recency_filter.matches(
                 JobLead(title="Unknown", posted_date="6 days left"),
                 now,

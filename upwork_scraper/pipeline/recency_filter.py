@@ -21,9 +21,11 @@ class RecencyFilter:
         self,
         max_age_hours: float | None,
         keep_unknown: bool = True,
+        strict_date_only: bool = False,
     ) -> None:
         self.max_age_hours = max_age_hours
         self.keep_unknown = keep_unknown
+        self.strict_date_only = strict_date_only
 
     def matches(self, lead: JobLead, now: datetime | None = None) -> bool:
         if self.max_age_hours is None:
@@ -34,7 +36,7 @@ class RecencyFilter:
         posted_at = self.parse_posted_at(lead.posted_date, reference)
         if posted_at is None:
             return self.keep_unknown
-        if self._is_date_only(lead.posted_date):
+        if self._is_date_only(lead.posted_date) and not self.strict_date_only:
             cutoff_date = (
                 reference - timedelta(hours=self.max_age_hours)
             ).date()
@@ -131,6 +133,15 @@ class RecencyFilter:
         # Freelancer's "days left" is a deadline, not a posted time.
         if "left" in lowered:
             return None
+
+        # Preserve the timezone embedded in ISO-8601 platform timestamps.
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            pass
 
         try:
             parsed = parsedate_to_datetime(text)
