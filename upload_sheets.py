@@ -5,7 +5,6 @@ import os
 import logging
 import time
 from pathlib import Path
-from collections import defaultdict
 
 import gspread
 from gspread.utils import rowcol_to_a1
@@ -18,6 +17,7 @@ from upwork_scraper.exporters.schema import (
     TIMING_HEADERS,
     TIMING_INSERT_INDEX,
 )
+from upwork_scraper.exporters.sheet_operations import prepend_rows_requests
 
 load_dotenv()
 
@@ -26,6 +26,8 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 CREDS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service-account.json")
 CSV_PATH = "output/leads_20260716_211534.csv"
+MIN_LEAD_SCORE = 30
+SHEET_TAB = os.getenv("GOOGLE_SHEET_TAB", "Leads")
 
 PLATFORM_SHEET_MAP = {
     "Bark.com": "Bark.com",
@@ -176,6 +178,14 @@ def _apply_fixed_layout(worksheet) -> None:
     })
 
 
+def _is_sheet_eligible(row: dict) -> bool:
+    try:
+        lead_score = float(row.get("Lead Score", "0") or 0)
+    except (TypeError, ValueError):
+        return False
+    return lead_score >= MIN_LEAD_SCORE
+
+
 def main():
     if not SHEET_ID:
         print("GOOGLE_SHEET_ID not set in .env")
@@ -196,12 +206,7 @@ def main():
     gc = gspread.authorize(creds)
     sheet = gc.open_by_key(SHEET_ID)
 
-    grouped = defaultdict(list)
-    for row in rows:
-        platform = row.get("Job Platform", "")
-        sheet_name = PLATFORM_SHEET_MAP.get(platform, platform)
-        grouped[sheet_name].append(row)
-
+    grouped = {SHEET_TAB: rows}
     for sheet_name, leads in grouped.items():
         print(f"\n{sheet_name}: {len(leads)} leads")
         try:
@@ -224,7 +229,14 @@ def main():
         }
 
         new_rows = []
-        for row in leads:
+        newest_first = sorted(
+            leads,
+            key=lambda row: row.get("Lead Found At", ""),
+            reverse=True,
+        )
+        for row in newest_first:
+            if not _is_sheet_eligible(row):
+                continue
             if row.get("Job Title", "") in existing_titles:
                 continue
             new_rows.append([row.get(h, "") for h in SHEET_HEADERS])
@@ -238,7 +250,13 @@ def main():
             print("  No new leads to upload.")
             continue
 
-        worksheet.append_rows(new_rows, value_input_option="USER_ENTERED")
+        worksheet.spreadsheet.batch_update({
+            "requests": prepend_rows_requests(
+                worksheet.id,
+                new_rows,
+                start_row_index=1,
+            )
+        })
         try:
             _apply_fixed_layout(worksheet)
             worksheet.set_basic_filter()

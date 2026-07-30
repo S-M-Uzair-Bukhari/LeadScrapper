@@ -8,6 +8,7 @@ from ..analyzer import LeadAnalysis, LeadAnalyzer
 from ..models import JobLead
 from .deduplicator import RunDeduplicator
 from .location_filter import LocationFilter
+from .recency_filter import RecencyFilter
 
 
 @dataclass(frozen=True)
@@ -22,12 +23,16 @@ class LeadProcessor:
         analyzer: LeadAnalyzer,
         deduplicator: RunDeduplicator,
         location_filter: LocationFilter,
+        recency_filter: RecencyFilter | None = None,
     ) -> None:
         self._analyzer = analyzer
         self._deduplicator = deduplicator
         self._location_filter = location_filter
+        self._recency_filter = recency_filter or RecencyFilter(None)
 
     def process(self, lead: JobLead) -> ProcessedLead | None:
+        if not self._recency_filter.matches(lead):
+            return None
         if not self._deduplicator.accept(lead):
             return None
 

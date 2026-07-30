@@ -8,16 +8,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from upwork_scraper.analyzer import LeadAnalysis
+from upwork_scraper.analyzer import LeadAnalysis, LeadAnalyzer
 from upwork_scraper.config import ScraperConfig
 from upwork_scraper.exporters.sheets import SheetsBatchWriter
 from upwork_scraper.exporters.rows import processed_lead_to_row
 from upwork_scraper.models import JobLead
 from upwork_scraper.orchestration.engine import LeadEngine
+from upwork_scraper.orchestration.policy import DailyRunPolicy
 from upwork_scraper.pipeline.deduplicator import RunDeduplicator
 from upwork_scraper.pipeline.location_filter import LocationFilter
 from upwork_scraper.pipeline.processor import LeadProcessor, ProcessedLead
+from upwork_scraper.pipeline.recency_filter import RecencyFilter
 from upwork_scraper.platforms.base import PlatformAdapter
+from upwork_scraper.storage.sqlite_repository import SQLiteLeadRepository
+from upwork_scraper.timezones import resolve_timezone
 
 
 class _AnalyzerStub:
@@ -39,7 +43,7 @@ class _RepositoryStub:
 
 class _SheetsWriterProbe(SheetsBatchWriter):
     def __init__(self) -> None:
-        config = SimpleNamespace(google_sheet_id="test", sheets_batch_size=10)
+        config = SimpleNamespace(google_sheet_id="test", sheets_batch_size=5)
         super().__init__(config, _RepositoryStub())
         self.flush_calls: list[tuple[str, int | None]] = []
 
@@ -74,6 +78,149 @@ class _FailingSheetsWriter(SheetsBatchWriter):
 
 
 class StructuralPipelineTests(unittest.TestCase):
+    def test_decision_maker_and_description_are_ten_points_each(self) -> None:
+        analyzer = LeadAnalyzer()
+        analysis = LeadAnalysis(
+            _found_decision_maker=True,
+            _found_full_description=True,
+        )
+
+        analyzer._score(analysis)
+
+        self.assertEqual(analysis.lead_score, 20)
+
+    def test_priority_uses_strict_score_boundaries(self) -> None:
+        analyzer = LeadAnalyzer()
+        expectations = {
+            29: "RED",
+            30: "RED",
+            49: "RED",
+            50: "YELLOW",
+            69: "YELLOW",
+            70: "GREEN",
+        }
+
+        for score, expected in expectations.items():
+            with self.subTest(score=score):
+                analysis = LeadAnalysis(lead_score=score)
+                analyzer._classify(analysis)
+                self.assertEqual(analysis.priority, expected)
+
+    def test_formats_whole_run_duration(self) -> None:
+        self.assertEqual(
+            LeadEngine._format_duration(3723.4),
+            "01:02:03",
+        )
+
+    def test_daily_policy_uses_first_and_later_limits(self) -> None:
+        config = ScraperConfig()
+
+        first = DailyRunPolicy.from_config(config, 1)
+        later = DailyRunPolicy.from_config(config, 2, 2.0)
+
+        self.assertEqual(first.max_results_per_keyword, 1000)
+        self.assertEqual(first.page_limit, 100)
+        self.assertEqual(first.recency_hours, 14.0)
+        self.assertTrue(first.is_catch_up)
+        self.assertEqual(later.max_results_per_keyword, 20)
+        self.assertEqual(later.page_limit, 2)
+        self.assertIsNone(later.recency_hours)
+        self.assertFalse(later.is_catch_up)
+
+    def test_daily_policy_catches_up_after_fourteen_hour_gap(self) -> None:
+        config = ScraperConfig()
+
+        catch_up = DailyRunPolicy.from_config(config, 7, 15.5)
+
+        self.assertEqual(catch_up.max_results_per_keyword, 1000)
+        self.assertEqual(catch_up.page_limit, 100)
+        self.assertEqual(catch_up.recency_hours, 14.0)
+        self.assertTrue(catch_up.is_catch_up)
+
+    def test_daily_policy_can_force_catch_up_for_testing(self) -> None:
+        config = ScraperConfig(force_catch_up=True)
+
+        catch_up = DailyRunPolicy.from_config(config, 8, 0.1)
+
+        self.assertTrue(catch_up.is_catch_up)
+        self.assertEqual(catch_up.recency_hours, 14.0)
+        self.assertEqual(catch_up.page_limit, 100)
+
+    def test_daily_run_number_is_persisted_by_local_date(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = SQLiteLeadRepository(
+                str(Path(temp_dir) / "leads.db"),
+                "run-1",
+            )
+            try:
+                first = repository.claim_daily_run(
+                    "2026-07-30", "2026-07-30T09:00:00+05:00"
+                )
+            finally:
+                repository.close()
+
+            repository = SQLiteLeadRepository(
+                str(Path(temp_dir) / "leads.db"),
+                "run-2",
+            )
+            try:
+                second = repository.claim_daily_run(
+                    "2026-07-30", "2026-07-30T12:00:00+05:00"
+                )
+            finally:
+                repository.close()
+
+            self.assertEqual(first, 1)
+            self.assertEqual(second, 2)
+
+    def test_only_completed_runs_set_the_catch_up_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = str(Path(temp_dir) / "leads.db")
+            repository = SQLiteLeadRepository(database, "aborted-run")
+            repository.claim_daily_run(
+                "2026-07-30", "2026-07-30T08:00:00+05:00"
+            )
+            repository.close()
+
+            repository = SQLiteLeadRepository(database, "completed-run")
+            repository.claim_daily_run(
+                "2026-07-30", "2026-07-30T09:00:00+05:00"
+            )
+            repository.mark_run_completed("2026-07-30T09:30:00+05:00")
+            repository.close()
+
+            repository = SQLiteLeadRepository(database, "next-run")
+            try:
+                self.assertEqual(
+                    repository.latest_completed_at(),
+                    "2026-07-30T09:30:00+05:00",
+                )
+            finally:
+                repository.close()
+
+    def test_first_run_recency_filter_keeps_only_last_14_hours(self) -> None:
+        recency_filter = RecencyFilter(14, keep_unknown=True)
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+
+        self.assertTrue(
+            recency_filter.matches(
+                JobLead(title="Recent", posted_date="14 hours ago"),
+                now,
+            )
+        )
+        self.assertFalse(
+            recency_filter.matches(
+                JobLead(title="Old", posted_date="15 hours ago"),
+                now,
+            )
+        )
+        self.assertTrue(
+            recency_filter.matches(
+                JobLead(title="Unknown", posted_date="6 days left"),
+                now,
+            )
+        )
+
     def test_deduplicates_titles_case_insensitively(self) -> None:
         deduplicator = RunDeduplicator()
         first = JobLead(title="React Developer")
@@ -112,11 +259,11 @@ class StructuralPipelineTests(unittest.TestCase):
 
         self.assertIsNone(result)
 
-    def test_sheets_upload_triggers_at_ten_qualified_leads(self) -> None:
+    def test_sheets_upload_triggers_at_five_eligible_leads(self) -> None:
         writer = _SheetsWriterProbe()
         analysis = LeadAnalysis(priority="GREEN", lead_score=50)
 
-        for index in range(9):
+        for index in range(4):
             writer.add(
                 ProcessedLead(
                     JobLead(title=f"Lead {index}", platform="Upwork"),
@@ -128,12 +275,50 @@ class StructuralPipelineTests(unittest.TestCase):
 
         writer.add(
             ProcessedLead(
-                JobLead(title="Lead 9", platform="Upwork"),
+                JobLead(title="Lead 4", platform="Upwork"),
                 analysis,
             ),
-            "lead-9",
+            "lead-4",
         )
-        self.assertEqual(writer.flush_calls, [("Upwork", 10)])
+        self.assertEqual(writer.flush_calls, [("Leads", 5)])
+
+    def test_shared_sheet_batch_combines_platforms(self) -> None:
+        writer = _SheetsWriterProbe()
+        analysis = LeadAnalysis(priority="GREEN", lead_score=50)
+
+        for index, platform in enumerate(
+            ["Upwork", "Freelancer", "Guru", "Upwork (Vollna)", "Upwork"]
+        ):
+            writer.add(
+                ProcessedLead(
+                    JobLead(title=f"Mixed Lead {index}", platform=platform),
+                    analysis,
+                ),
+                f"mixed-{index}",
+            )
+
+        self.assertEqual(writer.flush_calls, [("Leads", 5)])
+        stats = writer.stats()
+        self.assertEqual(stats["Upwork"]["eligible"], 2)
+        self.assertEqual(stats["Freelancer"]["eligible"], 1)
+        self.assertEqual(stats["Guru"]["eligible"], 1)
+        self.assertEqual(stats["Vollna"]["eligible"], 1)
+
+    def test_sheets_rejects_scores_below_thirty(self) -> None:
+        writer = _SheetsWriterProbe()
+        analysis = LeadAnalysis(priority="RED", lead_score=29)
+
+        for index in range(5):
+            writer.add(
+                ProcessedLead(
+                    JobLead(title=f"Low score {index}", platform="Upwork"),
+                    analysis,
+                ),
+                f"low-{index}",
+            )
+
+        self.assertEqual(writer.flush_calls, [])
+        self.assertEqual(writer._buffers["Leads"], [])
 
     def test_sheets_write_retries_429_with_exponential_backoff(self) -> None:
         writer = _SheetsWriterProbe()
@@ -179,8 +364,8 @@ class StructuralPipelineTests(unittest.TestCase):
             )
 
         self.assertEqual(writer.append_attempts, 1)
-        self.assertEqual(len(writer._buffers["Upwork"]), 10)
-        self.assertEqual(writer._retry_not_before["Upwork"], 160.0)
+        self.assertEqual(len(writer._buffers["Leads"]), 10)
+        self.assertEqual(writer._retry_not_before["Leads"], 160.0)
 
         writer.add(
             ProcessedLead(
@@ -190,7 +375,7 @@ class StructuralPipelineTests(unittest.TestCase):
             "quota-10",
         )
         self.assertEqual(writer.append_attempts, 1)
-        self.assertEqual(len(writer._buffers["Upwork"]), 11)
+        self.assertEqual(len(writer._buffers["Leads"]), 11)
 
     def test_export_row_records_found_to_sheet_duration(self) -> None:
         item = ProcessedLead(
@@ -206,10 +391,11 @@ class StructuralPipelineTests(unittest.TestCase):
             sheet_saved_at=datetime(
                 2026, 7, 29, 10, 0, 12, 500000, tzinfo=timezone.utc
             ),
+            display_timezone=resolve_timezone("Asia/Karachi"),
         )
 
-        self.assertEqual(row["Lead Found At"], "2026-07-29T10:00:00+00:00")
-        self.assertEqual(row["Sheet Saved At"], "2026-07-29T10:00:12+00:00")
+        self.assertEqual(row["Lead Found At"], "2026-07-29 3:00 PM")
+        self.assertEqual(row["Sheet Saved At"], "2026-07-29 3:00 PM")
         self.assertEqual(row["Found-to-Sheet Seconds"], "12.50")
 
     def test_engine_processes_keyword_results_without_network(self) -> None:

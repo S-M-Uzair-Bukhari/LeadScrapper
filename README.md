@@ -114,7 +114,7 @@ upwork_scraper/
 |-- vollna.py                  existing Vollna RSS scraper
 |-- freelancer.py              existing Freelancer scraper
 |-- guru.py                    existing Guru scraper
-`-- bark_scraper.py            existing Bark scraper
+`-- bark_scraper.py            preserved but temporarily disabled
 ```
 
 ## Installation
@@ -173,6 +173,9 @@ Limit results per keyword:
 python main.py -r 20
 ```
 
+Passing `-r` disables the adaptive daily policy for that run so the explicit
+CLI value is respected.
+
 Export JSON:
 
 ```powershell
@@ -185,6 +188,28 @@ Show detailed logs:
 python main.py -v
 ```
 
+By default, one command starts a session of 10 runs. Each completed run is
+followed by a 30-second wait. The first eligible run uses catch-up mode; after
+that successful checkpoint, later session runs use normal mode.
+
+Run only once:
+
+```powershell
+python main.py --runs 1
+```
+
+Keep running until manually stopped with `Ctrl+C`:
+
+```powershell
+python main.py --continuous
+```
+
+Change the delay or session limit:
+
+```powershell
+python main.py --runs 10 --interval 30
+```
+
 ## Runtime configuration
 
 The main structural settings are in `ScraperConfig`:
@@ -195,13 +220,59 @@ The main structural settings are in `ScraperConfig`:
 | `max_browser_workers` | `2` | Maximum browser-capable searches running concurrently |
 | `event_queue_size` | `100` | Maximum keyword-result batches awaiting processing |
 | `max_results_per_keyword` | `50` | Result cap returned by each platform search |
-| `sheets_batch_size` | `10` | Qualified leads per Sheets upload |
+| `google_sheet_tab` | `Leads` | Single worksheet receiving every platform |
+| `sheets_batch_size` | `5` | Eligible leads per streaming Sheets upload |
+| `sheets_min_lead_score` | `30` | Minimum score saved to Google Sheets |
 | `sheets_min_write_interval` | `1.1` | Minimum seconds between Sheets write requests |
 | `sheets_retry_attempts` | `5` | Attempts for quota and temporary API failures |
 | `sheets_quota_cooldown` | `60` | Cooldown after a batch exhausts its retries |
 | `database_path` | `data/leads.db` | SQLite checkpoint database |
 | `output_dir` | `output` | Final CSV/JSON directory |
 | `output_format` | `csv` | Local output format |
+
+## Adaptive daily collection
+
+Daily mode is enabled by default and uses the computer's local calendar date.
+The default policy timezone is `Asia/Karachi`, and run state is stored in
+`data/leads.db`. Set `SCRAPER_TIMEZONE` in `.env` to use another IANA timezone
+such as `America/New_York`.
+
+| Daily run | Jobs per keyword | Page/scroll limit | Posted-time behavior |
+|---|---:|---:|---|
+| First or catch-up run | Up to 1,000 | Up to 100 | Continue until reaching jobs older than 14 hours |
+| Later runs | 20 | 2 | Keep newest-first platform results |
+
+A catch-up run is selected for the first run of the local day or whenever at
+least 14 hours have elapsed since the last successfully completed run. Started
+or aborted runs do not suppress catch-up mode. The window means “not older
+than 14 hours.” The high result/page limits are safety ceilings: paginated
+scrapers stop earlier when a newest-first page reaches the lookback boundary
+or the platform has no more results.
+
+Platform mapping:
+
+- Upwork Selenium and Bark treat the page limit as scroll/load batches.
+- Freelancer and Guru request up to that many result pages.
+- Upwork direct/Wayback attempts up to that many pages or snapshots.
+- Vollna is an RSS feed, so it has no page concept; only the job limit applies.
+
+Upwork, Vollna, Bark, and dated Guru records can be filtered using their
+posting timestamps. Freelancer exposes a bid deadline such as `6 days left`,
+not a reliable posting timestamp. Unparseable timestamps are retained from
+newest-first results by default (`keep_unknown_posted_dates=True`) rather than
+being incorrectly classified as old.
+
+To disable adaptive mode:
+
+```powershell
+python main.py --no-adaptive-daily
+```
+
+To force and test a catch-up immediately, without changing database history:
+
+```powershell
+python main.py --catch-up
+```
 
 ## Output behavior
 
@@ -235,12 +306,49 @@ large descriptions and URLs from resizing the worksheet.
 Every lead row also records:
 
 - `Lead Found At`: UTC time when the scraper created the `JobLead`.
-- `Sheet Saved At`: UTC time when that batch was sent to Google Sheets.
+- `Sheet Saved At`: local time when that batch was sent to Google Sheets.
 - `Found-to-Sheet Seconds`: elapsed seconds between those timestamps.
 
 Existing sheets using the previous 23-column schema are migrated by inserting
 these three columns after `Date Posted`, preserving the alignment of older
 lead data.
+
+All platforms are stored in one `Leads` worksheet and identified by the
+`Job Platform` column. New five-lead batches are inserted directly below the
+header while scraping is still running. The newest discovery timestamp is
+placed first within each batch, while existing rows shift downward.
+
+After the qualified lead summary, the CLI prints the complete run duration:
+
+```text
+Total scraper run time: 01:02:03 (3723.40 seconds)
+```
+
+This covers platform scraping, processing, SQLite checkpoints, Sheets flushes,
+quota waits/retries, and the final local export.
+
+## Lead scoring and Sheet eligibility
+
+Important positive weights include:
+
+- Company website: 25
+- Company name: 15
+- Business email: 20 (general email: 10)
+- Decision-maker: 10
+- Non-empty job description: 10
+- Budget, matching service, long-term opportunity, and business clue: 10 each
+
+Priority is based strictly on the final 0–100 score:
+
+| Score | Priority | Google Sheets |
+|---:|---|---|
+| 0–29 | RED | Not uploaded |
+| 30–49 | RED | Uploaded |
+| 50–69 | YELLOW | Uploaded |
+| 70–100 | GREEN | Uploaded |
+
+Scores below 30 remain available in SQLite and local CSV/JSON exports. Unique,
+recency, and location filtering continue to run before this Sheets cutoff.
 
 ## Failure behavior
 

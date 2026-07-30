@@ -7,7 +7,8 @@ blocks curl_cffi impersonation. CDX checks run concurrently for speed.
 
 import time
 import logging
-from urllib.parse import quote_plus
+from datetime import datetime, timezone
+from urllib.parse import parse_qs, quote, quote_plus, urlparse
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -17,6 +18,7 @@ from selectolax.parser import HTMLParser
 
 from .config import ScraperConfig
 from .models import JobLead
+from .pipeline.recency_filter import RecencyFilter
 from .selenium_scraper import UpworkSeleniumScraper
 
 logger = logging.getLogger(__name__)
@@ -25,8 +27,13 @@ logger = logging.getLogger(__name__)
 class UpworkScraper:
     """Scrape Upwork job data via Wayback Machine archives."""
 
-    def __init__(self, config: ScraperConfig | None = None):
+    def __init__(
+        self,
+        config: ScraperConfig | None = None,
+        selenium_fallback: bool = True,
+    ):
         self.config = config or ScraperConfig()
+        self.selenium_fallback = selenium_fallback
         self._curl = cffi_requests.Session(impersonate=self.config.impersonate_browser)
         self._plain = std_requests.Session()
         self._plain.headers.update({
@@ -44,13 +51,28 @@ class UpworkScraper:
     # ==================================================================
 
     def search_keyword(self, keyword: str) -> list[JobLead]:
+        # Archived snapshots cannot represent the current 14-hour window.
+        if self.config.collection_recency_hours is not None:
+            leads = self._search_direct(keyword)
+            if leads:
+                return leads[:self.config.max_results_per_keyword]
+            if not self.selenium_fallback:
+                return []
+            return self._search_via_selenium(
+                keyword
+            )[:self.config.max_results_per_keyword]
+
         leads = self._search_via_wayback(keyword)
         if leads:
             return leads[:self.config.max_results_per_keyword]
         leads = self._search_direct(keyword)
         if leads:
             return leads[:self.config.max_results_per_keyword]
-        return self._search_via_selenium(keyword)[:self.config.max_results_per_keyword]
+        if not self.selenium_fallback:
+            return []
+        return self._search_via_selenium(
+            keyword
+        )[:self.config.max_results_per_keyword]
 
     def _search_via_selenium(self, keyword: str) -> list[JobLead]:
         try:
@@ -80,8 +102,12 @@ class UpworkScraper:
         category_slugs = self._expand_keyword_to_slugs(slug)
 
         urls = []
-        # Modern search page (2024 snapshots available) first
-        urls.append(f"https://www.upwork.com/nx/search/jobs/?q={quote_plus(keyword)}")
+        # Modern search pages (2024 snapshots available) first.
+        for page in range(1, max(1, self.config.page_limit) + 1):
+            urls.append(
+                "https://www.upwork.com/nx/search/jobs/"
+                f"?q={quote_plus(keyword)}&sort=recency&page={page}"
+            )
         # Old category pages
         for cat_slug in category_slugs:
             urls.append(f"https://www.upwork.com/freelance-jobs/{cat_slug}/")
@@ -91,12 +117,22 @@ class UpworkScraper:
         if not snapshots:
             return []
 
-        _, url_type, snap_url = snapshots[0]
-        page_html = self._fetch_wayback(snap_url)
-        if not page_html:
-            return []
+        def snapshot_order(item: tuple[str, str, str]) -> tuple[int, int]:
+            source_url, url_type, _ = item
+            page = int(parse_qs(urlparse(source_url).query).get("page", ["1"])[0])
+            return (0 if url_type == "search" else 1, page)
 
-        return self._parse_html_jobs(page_html, keyword, url_type)
+        leads: list[JobLead] = []
+        for _, url_type, snap_url in sorted(
+            snapshots, key=snapshot_order
+        )[:self.config.page_limit]:
+            page_html = self._fetch_wayback(snap_url)
+            if not page_html:
+                continue
+            leads.extend(self._parse_html_jobs(page_html, keyword, url_type))
+            if len(leads) >= self.config.max_results_per_keyword:
+                break
+        return leads[:self.config.max_results_per_keyword]
 
     def _find_all_snapshots(self, urls: list[str]) -> list[tuple[str, str, str]]:
         """Check CDX for all candidate URLs concurrently. Returns
@@ -125,7 +161,7 @@ class UpworkScraper:
             return self._cdx_cache[url]
         cdx = (
             f"https://web.archive.org/cdx/search/cdx"
-            f"?url={url}&output=json&limit=1"
+            f"?url={quote(url, safe='')}&output=json&limit=1"
             f"&fl=timestamp,statuscode&filter=statuscode:200"
         )
         result = None
@@ -301,13 +337,26 @@ class UpworkScraper:
 
     def _search_direct(self, keyword: str) -> list[JobLead]:
         leads: list[JobLead] = []
+        reference = datetime.now(timezone.utc)
         search_url = "https://www.upwork.com/nx/search/jobs/"
-        params = {"q": keyword, "sort": "recency", "page": "1"}
-        html = self._fetch_direct(search_url, params=params)
-        if html and len(html) > 1000:
+        for page in range(1, max(1, self.config.page_limit) + 1):
+            params = {"q": keyword, "sort": "recency", "page": str(page)}
+            html = self._fetch_direct(search_url, params=params)
+            if not html or len(html) <= 1000:
+                break
             cards = self._parse_search_page(HTMLParser(html), keyword)
             leads.extend(cards)
-        return leads
+            if (
+                len(leads) >= self.config.max_results_per_keyword
+                or not cards
+                or RecencyFilter.page_reaches_boundary(
+                    cards,
+                    self.config.collection_recency_hours,
+                    reference,
+                )
+            ):
+                break
+        return leads[:self.config.max_results_per_keyword]
 
     def _fetch_direct(self, url: str, params: dict | None = None) -> Optional[str]:
         try:

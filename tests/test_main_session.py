@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+import unittest
+from unittest.mock import patch
+
+import main
+
+
+class SessionRunnerTests(unittest.TestCase):
+    def test_session_defaults_to_ten_runs_and_thirty_seconds(self) -> None:
+        args = main.parse_args([])
+
+        self.assertEqual(args.runs, 10)
+        self.assertEqual(args.interval, 30.0)
+        self.assertFalse(args.continuous)
+
+    def test_forced_catch_up_applies_only_to_first_session_run(self) -> None:
+        args = main.parse_args(
+            ["--runs", "3", "--interval", "0", "--catch-up"]
+        )
+        force_values: list[bool] = []
+        closed: list[bool] = []
+
+        class EngineFake:
+            def __init__(self, config) -> None:
+                force_values.append(config.force_catch_up)
+
+            def run(self) -> list:
+                return []
+
+            def close(self) -> None:
+                closed.append(True)
+
+        with (
+            patch.object(main, "LeadEngine", EngineFake),
+            patch.object(main.time, "sleep") as sleep,
+        ):
+            exit_code = main.run_session(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(force_values, [True, False, False])
+        self.assertEqual(len(closed), 3)
+        self.assertEqual(sleep.call_count, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

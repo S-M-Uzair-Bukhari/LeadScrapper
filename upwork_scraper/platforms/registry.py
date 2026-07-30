@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..bark_scraper import BarkScraper
+# from ..bark_scraper import BarkScraper  # Temporarily disabled.
 from ..config import ScraperConfig
 from ..freelancer import FreelancerScraper
 from ..guru import GuruScraper
@@ -15,9 +15,13 @@ from .base import PlatformAdapter
 def build_platform_adapters(config: ScraperConfig) -> dict[str, PlatformAdapter]:
     """Build enabled scraper instances without changing their core behavior."""
     adapters: dict[str, PlatformAdapter] = {}
+    resolved_platforms = config.resolved_platforms
 
-    if "upwork" in config.resolved_platforms:
-        scraper = UpworkScraper(config)
+    if "upwork" in resolved_platforms:
+        scraper = UpworkScraper(
+            config,
+            selenium_fallback="upwork_selenium" not in resolved_platforms,
+        )
         adapters["upwork"] = PlatformAdapter(
             "upwork",
             scraper.search_keyword,
@@ -25,7 +29,7 @@ def build_platform_adapters(config: ScraperConfig) -> dict[str, PlatformAdapter]
             resource_group="browser",
         )
 
-    if "upwork_selenium" in config.resolved_platforms:
+    if "upwork_selenium" in resolved_platforms:
         scraper = UpworkSeleniumScraper(config)
         adapters["upwork_selenium"] = PlatformAdapter(
             "upwork_selenium",
@@ -34,39 +38,48 @@ def build_platform_adapters(config: ScraperConfig) -> dict[str, PlatformAdapter]
             resource_group="browser",
         )
 
-    if "vollna" in config.resolved_platforms:
+    if "vollna" in resolved_platforms:
         scraper = VollnaScraper(config)
         adapters["vollna"] = PlatformAdapter(
             "vollna", scraper.search_keyword, scraper.close
         )
 
-    if "freelancer" in config.resolved_platforms:
+    if "freelancer" in resolved_platforms:
         scraper = FreelancerScraper()
         adapters["freelancer"] = PlatformAdapter(
             "freelancer",
             lambda keyword, instance=scraper: instance.scrape(
-                keyword, config.max_results_per_keyword
+                keyword,
+                config.max_results_per_keyword,
+                config.page_limit,
+                config.collection_recency_hours,
             ),
             getattr(scraper, "close", None),
         )
 
-    if "guru" in config.resolved_platforms:
+    if "guru" in resolved_platforms:
         scraper = GuruScraper()
         adapters["guru"] = PlatformAdapter(
             "guru",
             lambda keyword, instance=scraper: instance.scrape(
-                keyword, config.max_results_per_keyword
+                keyword,
+                config.max_results_per_keyword,
+                config.page_limit,
+                config.collection_recency_hours,
             ),
             getattr(scraper, "close", None),
         )
 
-    if "bark" in config.resolved_platforms:
-        scraper = BarkScraper(config)
-        adapters["bark"] = PlatformAdapter(
-            "bark",
-            scraper.search_keyword,
-            scraper.close,
-            resource_group="browser",
-        )
+    # Bark is temporarily disabled. Keep this registration block intact so it
+    # can be restored together with the ALL_PLATFORMS entry in config.py.
+    #
+    # if "bark" in config.resolved_platforms:
+    #     scraper = BarkScraper(config)
+    #     adapters["bark"] = PlatformAdapter(
+    #         "bark",
+    #         scraper.search_keyword,
+    #         scraper.close,
+    #         resource_group="browser",
+    #     )
 
     return adapters

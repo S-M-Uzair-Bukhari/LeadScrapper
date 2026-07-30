@@ -9,6 +9,7 @@ from curl_cffi import requests as cffi_requests
 from selectolax.parser import HTMLParser
 
 from .models import JobLead
+from .pipeline.recency_filter import RecencyFilter
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,13 @@ class GuruScraper:
             skill_els = rec.css(".jobRecord__skills a, [class*=skill] a")
             skills = [s.text(strip=True) for s in skill_els if s.text(strip=True)]
 
-            link_el = rec.css_first("a[href*='/d/jobs/']")
+            # Guru places the canonical job-detail link inside the title.
+            # Other links in the record point to category pages under
+            # ``/d/jobs/`` and must not be saved as the lead URL.
+            link_el = title_el.css_first("a[href]")
             href = link_el.attributes.get("href", "") if link_el else ""
+            clean_href = re.split(r"[?&]", href, maxsplit=1)[0]
+            job_id_match = re.search(r"/(\d+)/?$", clean_href)
 
             posted = ""
             quotes = ""
@@ -82,36 +88,65 @@ class GuruScraper:
                 job_type="",
                 budget=budget,
                 posted_date=posted,
-                url=urljoin(BASE_URL, href) if href else "",
+                url=urljoin(BASE_URL, clean_href) if clean_href else "",
                 description=description[:500],
                 skills_required=", ".join(skills) if skills else "",
                 experience_level="",
                 country="",
                 valid_job="Yes",
-                job_id=href.split("/")[-1] if href else "",
+                job_id=job_id_match.group(1) if job_id_match else "",
             )
             leads.append(lead)
 
         return leads
 
-    def scrape(self, keyword: str, max_results: int = 25) -> list[JobLead]:
+    def scrape(
+        self,
+        keyword: str,
+        max_results: int = 25,
+        page_limit: int = 1,
+        recency_hours: float | None = None,
+    ) -> list[JobLead]:
         skill = self._pick_skill(keyword)
         url = f"{BASE_URL}/d/jobs/skill/{skill}/"
-        logger.info("Guru: fetching %s", url)
+        leads: list[JobLead] = []
+        seen: set[str] = set()
+        for page in range(1, max(1, page_limit) + 1):
+            logger.info("Guru: fetching %s (page %d)", url, page)
+            try:
+                resp = self._session.get(
+                    url,
+                    params={"page": page},
+                    timeout=30,
+                    headers={
+                        "Accept": "text/html",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Guru: status %d for %s", resp.status_code, url
+                    )
+                    break
+            except Exception as exc:
+                logger.error("Guru: request failed: %s", exc)
+                break
 
-        try:
-            resp = self._session.get(
-                url,
-                timeout=30,
-                headers={"Accept": "text/html", "Accept-Language": "en-US,en;q=0.9"},
-            )
-            if resp.status_code != 200:
-                logger.warning("Guru: status %d for %s", resp.status_code, url)
-                return []
-        except Exception as exc:
-            logger.error("Guru: request failed: %s", exc)
-            return []
+            page_leads = self._parse_records(resp.text)
+            for lead in page_leads:
+                key = lead.url or lead.title
+                if key not in seen:
+                    seen.add(key)
+                    leads.append(lead)
+            if (
+                len(leads) >= max_results
+                or not page_leads
+                or RecencyFilter.page_reaches_boundary(
+                    page_leads,
+                    recency_hours,
+                )
+            ):
+                break
 
-        leads = self._parse_records(resp.text)
         logger.info("Guru: parsed %d jobs", len(leads))
         return leads[:max_results]

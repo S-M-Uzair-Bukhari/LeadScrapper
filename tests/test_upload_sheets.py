@@ -12,8 +12,16 @@ from upload_sheets import (
     TIMING_INSERT_INDEX,
     _apply_fixed_layout,
     _ensure_headers,
+    _is_sheet_eligible,
 )
-from upwork_scraper.exporters.sheets import SheetsBatchWriter
+from upwork_scraper.analyzer import LeadAnalysis
+from upwork_scraper.exporters.sheets import (
+    SheetsBatchWriter,
+    _WorksheetState,
+)
+from upwork_scraper.exporters.sheet_operations import prepend_rows_requests
+from upwork_scraper.models import JobLead
+from upwork_scraper.pipeline.processor import ProcessedLead
 
 
 class _SpreadsheetFake:
@@ -78,6 +86,10 @@ class _WorksheetFake:
 
 
 class UploadSheetLayoutTests(unittest.TestCase):
+    def test_standalone_upload_requires_score_of_thirty(self) -> None:
+        self.assertFalse(_is_sheet_eligible({"Lead Score": "29"}))
+        self.assertTrue(_is_sheet_eligible({"Lead Score": "30"}))
+
     def test_empty_worksheet_receives_headers(self) -> None:
         worksheet = _WorksheetFake([])
 
@@ -156,6 +168,81 @@ class UploadSheetLayoutTests(unittest.TestCase):
             .get("dimension") == "COLUMNS"
         ]
         self.assertEqual(len(column_requests), len(COLUMN_WIDTHS))
+
+    def test_prepend_request_inserts_below_header_in_given_order(self) -> None:
+        requests = prepend_rows_requests(
+            123,
+            [["Newest lead"], ["Older lead"]],
+        )
+
+        insertion = requests[0]["insertDimension"]["range"]
+        self.assertEqual(insertion["startIndex"], 1)
+        self.assertEqual(insertion["endIndex"], 3)
+        inserted_rows = requests[1]["updateCells"]["rows"]
+        self.assertEqual(
+            inserted_rows[0]["values"][0]["userEnteredValue"]["stringValue"],
+            "Newest lead",
+        )
+        self.assertEqual(
+            inserted_rows[1]["values"][0]["userEnteredValue"]["stringValue"],
+            "Older lead",
+        )
+
+    def test_runtime_writer_counts_saved_duplicates_and_below_score(
+        self,
+    ) -> None:
+        writer = SheetsBatchWriter(
+            SimpleNamespace(
+                google_sheet_id="test",
+                sheets_batch_size=10,
+                sheets_min_lead_score=30,
+                sheets_min_write_interval=0,
+                local_timezone="Asia/Karachi",
+            ),
+            _RepositoryFake(),
+        )
+        worksheet = _WorksheetFake([SHEET_HEADERS, ["Existing Lead"]])
+        writer._states["Leads"] = _WorksheetState(
+            worksheet=worksheet,
+            titles={"existing lead"},
+        )
+        writer._format_rows = lambda *_: None
+
+        eligible = LeadAnalysis(priority="YELLOW", lead_score=50)
+        below_score = LeadAnalysis(priority="RED", lead_score=29)
+        writer.add(
+            ProcessedLead(
+                JobLead(title="Existing Lead", platform="Upwork"),
+                eligible,
+            ),
+            "existing",
+        )
+        writer.add(
+            ProcessedLead(
+                JobLead(title="New Lead", platform="Upwork"),
+                eligible,
+            ),
+            "new",
+        )
+        writer.add(
+            ProcessedLead(
+                JobLead(title="Below Score", platform="Upwork"),
+                below_score,
+            ),
+            "below",
+        )
+
+        result = writer._append_to_tab(
+            "Leads",
+            writer._buffers["Leads"],
+        )
+        writer._record_primary_result("Leads", result)
+        stats = writer.stats()["Upwork"]
+
+        self.assertEqual(stats["eligible"], 2)
+        self.assertEqual(stats["saved"], 1)
+        self.assertEqual(stats["duplicates"], 1)
+        self.assertEqual(stats["below_score"], 1)
 
 
 if __name__ == "__main__":

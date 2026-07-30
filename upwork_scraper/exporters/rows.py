@@ -1,6 +1,6 @@
 """Convert processed leads to the stable export row schema."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 
 from ..pipeline.processor import ProcessedLead
 
@@ -20,6 +20,7 @@ def _parse_utc_timestamp(value: str) -> datetime | None:
 def processed_lead_to_row(
     item: ProcessedLead,
     sheet_saved_at: datetime | None = None,
+    display_timezone: tzinfo | None = None,
 ) -> dict[str, str]:
     lead = item.lead
     analysis = item.analysis
@@ -35,17 +36,22 @@ def processed_lead_to_row(
     if found_at is not None and saved_at is not None:
         duration = f"{max(0.0, (saved_at - found_at).total_seconds()):.2f}"
 
+    def display_timestamp(value: datetime | None, fallback: str = "") -> str:
+        if value is None:
+            return fallback
+        if display_timezone is None:
+            return value.isoformat(timespec="seconds")
+        local_value = value.astimezone(display_timezone)
+        local_time = local_value.strftime("%I:%M %p").lstrip("0")
+        return f"{local_value:%Y-%m-%d} {local_time}"
+
     return {
         "Job Title": lead.title,
         "Job URL": lead.url,
         "Job Platform": lead.platform,
         "Date Posted": lead.posted_date,
-        "Lead Found At": (
-            found_at.isoformat(timespec="seconds") if found_at else lead.scraped_at
-        ),
-        "Sheet Saved At": (
-            saved_at.isoformat(timespec="seconds") if saved_at else ""
-        ),
+        "Lead Found At": display_timestamp(found_at, lead.scraped_at),
+        "Sheet Saved At": display_timestamp(saved_at),
         "Found-to-Sheet Seconds": duration,
         "Priority": analysis.priority,
         "Lead Score": str(analysis.lead_score),

@@ -9,7 +9,7 @@ import time
 import json
 import logging
 from urllib.parse import urlencode
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import undetected_chromedriver as uc
@@ -20,7 +20,9 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .config import ScraperConfig
+from .browser_cleanup import close_chrome_safely
 from .models import JobLead
+from .pipeline.recency_filter import RecencyFilter
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +62,7 @@ class UpworkSeleniumScraper:
 
     def close(self):
         if self._driver:
-            try:
-                self._driver.quit()
-            except Exception:
-                try:
-                    self._driver.close()
-                except Exception:
-                    pass
+            close_chrome_safely(self._driver)
             self._driver = None
             logger.info("Browser closed.")
 
@@ -81,10 +77,7 @@ class UpworkSeleniumScraper:
                 return self._driver
             except Exception:
                 logger.info("Browser session lost, recreating...")
-                try:
-                    self._driver.quit()
-                except Exception:
-                    pass
+                close_chrome_safely(self._driver)
                 self._driver = None
         logger.info("Launching Chrome via undetected_chromedriver...")
         options = uc.ChromeOptions()
@@ -172,22 +165,82 @@ class UpworkSeleniumScraper:
             logger.error("Cannot scrape — login failed.")
             return []
 
-        feed_url = SEARCH_URL + "?" + urlencode({"sort": "recency", "q": keyword})
-        logger.info("Searching: %s", feed_url)
-        cards = self._load_jobs(driver, feed_url)
-        logger.info("Loaded %d job cards for '%s'", len(cards), keyword)
+        leads: list[JobLead] = []
+        reference = datetime.now(timezone.utc)
+        previous_page_signature: tuple[str, ...] | None = None
+        for page in range(1, max(1, self.config.page_limit) + 1):
+            feed_url = SEARCH_URL + "?" + urlencode({
+                "sort": "recency",
+                "q": keyword,
+                "page": page,
+                "per_page": min(50, self.config.max_results_per_keyword),
+            })
+            logger.info("Searching Upwork page %d: %s", page, feed_url)
+            cards = self._load_jobs(
+                driver,
+                feed_url,
+                max_scrolls=self.config.selenium_max_scrolls,
+            )
+            logger.info(
+                "Loaded %d job cards from page %d for '%s'",
+                len(cards),
+                page,
+                keyword,
+            )
+            if not cards:
+                break
 
-        leads = []
-        for card in cards:
-            try:
-                job = self._parse_card(card, keyword)
-                if job and job.url not in self._seen_ids:
+            parsed_page: list[JobLead] = []
+            for card in cards:
+                try:
+                    job = self._parse_card(card, keyword)
+                    if job:
+                        parsed_page.append(job)
+                except WebDriverException:
+                    continue
+
+            page_signature = tuple(job.url or job.title for job in parsed_page)
+            if page_signature and page_signature == previous_page_signature:
+                logger.warning(
+                    "Upwork page %d repeated the previous page for '%s'; "
+                    "stopping pagination.",
+                    page,
+                    keyword,
+                )
+                break
+            previous_page_signature = page_signature
+
+            for job in parsed_page:
+                if job.url not in self._seen_ids:
                     self._seen_ids.add(job.url)
                     leads.append(job)
-            except WebDriverException:
-                continue
+            if len(leads) >= self.config.max_results_per_keyword:
+                break
+            if self._reached_lookback_boundary(parsed_page, reference):
+                logger.info(
+                    "Reached the %.0f-hour lookback boundary on Upwork "
+                    "page %d for '%s'.",
+                    self.config.collection_recency_hours,
+                    page,
+                    keyword,
+                )
+                break
 
-        return leads
+        return leads[:self.config.max_results_per_keyword]
+
+    def _reached_lookback_boundary(
+        self,
+        leads: list[JobLead],
+        reference: datetime,
+    ) -> bool:
+        hours = self.config.collection_recency_hours
+        if hours is None:
+            return False
+        return RecencyFilter.page_reaches_boundary(
+            leads,
+            hours,
+            reference,
+        )
 
     def _load_jobs(self, driver, feed_url: str, max_scrolls: int = 8):
         driver.get(feed_url)
@@ -203,6 +256,8 @@ class UpworkSeleniumScraper:
         seen = 0
         for _ in range(max_scrolls):
             cards = self._find_cards(driver)
+            if len(cards) >= self.config.max_results_per_keyword:
+                break
             if len(cards) == seen:
                 break
             seen = len(cards)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
@@ -18,9 +19,12 @@ from ..models import JobLead
 from ..pipeline.deduplicator import RunDeduplicator
 from ..pipeline.location_filter import LocationFilter
 from ..pipeline.processor import LeadProcessor, ProcessedLead
+from ..pipeline.recency_filter import RecencyFilter
 from ..platforms.registry import build_platform_adapters
 from ..storage.sqlite_repository import SQLiteLeadRepository
+from ..timezones import resolve_timezone
 from .events import KeywordResult, PlatformFinished
+from .policy import DailyRunPolicy
 from .scheduler import PlatformScheduler
 
 logger = logging.getLogger(__name__)
@@ -32,11 +36,38 @@ class LeadEngine:
 
     def __init__(self, config: ScraperConfig | None = None) -> None:
         self.config = config or ScraperConfig()
-        self.run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        self.run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         self.all_leads: list[JobLead] = []
         self.all_analyses: dict[str, LeadAnalysis] = {}
         self._processed: list[ProcessedLead] = []
+        self._scraped_counts: Counter = Counter()
         self._closed = False
+        self.last_run_duration_seconds: float | None = None
+
+        local_timezone = resolve_timezone(self.config.local_timezone)
+        started_local = datetime.now(local_timezone)
+        self._repository = SQLiteLeadRepository(
+            self.config.database_path, self.run_id
+        )
+        latest_completed_at = self._repository.latest_completed_at()
+        run_number = self._repository.claim_daily_run(
+            started_local.date().isoformat(),
+            started_local.isoformat(),
+        )
+        hours_since_last_completed = self._hours_since(
+            latest_completed_at,
+            started_local,
+        )
+        self.run_policy = DailyRunPolicy.from_config(
+            self.config,
+            run_number,
+            hours_since_last_completed,
+        )
+        self.config.max_results_per_keyword = (
+            self.run_policy.max_results_per_keyword
+        )
+        self.config.page_limit = self.run_policy.page_limit
+        self.config.collection_recency_hours = self.run_policy.recency_hours
 
         self._adapters = build_platform_adapters(self.config)
         self._deduplicator = RunDeduplicator()
@@ -44,9 +75,10 @@ class LeadEngine:
             LeadAnalyzer(),
             self._deduplicator,
             LocationFilter(self.config.target_locations),
-        )
-        self._repository = SQLiteLeadRepository(
-            self.config.database_path, self.run_id
+            RecencyFilter(
+                self.run_policy.recency_hours,
+                keep_unknown=self.config.keep_unknown_posted_dates,
+            ),
         )
         self._sheets = SheetsBatchWriter(self.config, self._repository)
         self._local_exporter = LocalExporter(
@@ -54,9 +86,29 @@ class LeadEngine:
         )
 
     def run(self) -> list[JobLead]:
+        run_started_at = time.monotonic()
         platforms = list(self._adapters)
         console.rule("[bold green]Multi-Platform Lead Generator")
         console.print(f"Platforms: [cyan]{', '.join(platforms)}[/cyan]")
+        if self.run_policy.is_first_run:
+            policy_label = "first daily run"
+        elif self.run_policy.is_catch_up:
+            policy_label = (
+                f"catch-up run (daily run #{self.run_policy.run_number})"
+            )
+        else:
+            policy_label = f"daily run #{self.run_policy.run_number}"
+        recency = (
+            f"last {self.run_policy.recency_hours:g} hours"
+            if self.run_policy.recency_hours is not None
+            else "newest-first platform results"
+        )
+        console.print(
+            f"Run policy: [cyan]{policy_label}; "
+            f"up to {self.config.max_results_per_keyword} jobs/keyword; "
+            f"up to {self.config.page_limit} pages; "
+            f"{recency}[/cyan]"
+        )
         console.print(
             f"Execution: [cyan]{self.config.max_platform_workers} "
             "platform workers; "
@@ -90,12 +142,49 @@ class LeadEngine:
 
         self._sheets.flush_all()
         path = self._local_exporter.export(self._processed, self.run_id)
+        self._repository.mark_run_completed()
+        self.last_run_duration_seconds = time.monotonic() - run_started_at
         self._print_summary()
+        self._print_sheets_summary()
+        console.print(
+            "[bold cyan]Total scraper run time:[/bold cyan] "
+            f"{self._format_duration(self.last_run_duration_seconds)} "
+            f"({self.last_run_duration_seconds:.2f} seconds)"
+        )
         console.print(
             f"\n[bold green]Exported {len(self._processed)} qualified "
             f"leads to {path}[/bold green]"
         )
         return self.all_leads
+
+    @staticmethod
+    def _format_duration(total_seconds: float) -> str:
+        whole_seconds = max(0, int(round(total_seconds)))
+        hours, remainder = divmod(whole_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    @staticmethod
+    def _hours_since(
+        earlier: str | None,
+        later: datetime,
+    ) -> float | None:
+        if not earlier:
+            return None
+        try:
+            earlier_time = datetime.fromisoformat(earlier)
+        except ValueError:
+            return None
+        if earlier_time.tzinfo is None:
+            earlier_time = earlier_time.replace(tzinfo=timezone.utc)
+        if later.tzinfo is None:
+            later = later.replace(tzinfo=timezone.utc)
+        return max(
+            0.0,
+            (later.astimezone(timezone.utc) - earlier_time.astimezone(timezone.utc))
+            .total_seconds()
+            / 3600,
+        )
 
     def _handle_keyword_result(
         self,
@@ -112,6 +201,8 @@ class LeadEngine:
             return
 
         accepted = 0
+        platform_label = self._event_platform_label(event)
+        self._scraped_counts[platform_label] += len(event.leads)
         for lead in event.leads:
             lead.keyword_searched = event.keyword
             item = self._processor.process(lead)
@@ -139,9 +230,10 @@ class LeadEngine:
         )
 
     def _print_summary(self) -> None:
-        table = Table(title="Qualified Lead Summary", show_lines=True)
+        table = Table(title="Lead Collection Summary", show_lines=True)
         table.add_column("Platform", style="cyan")
-        table.add_column("Leads", justify="right")
+        table.add_column("Scraped", justify="right")
+        table.add_column("Qualified", justify="right")
         table.add_column("GREEN", justify="right", style="green")
         table.add_column("YELLOW", justify="right", style="yellow")
         table.add_column("RED", justify="right", style="red")
@@ -154,15 +246,76 @@ class LeadEngine:
             summary[platform]["total"] += 1
             summary[platform][item.analysis.priority] += 1
 
-        for platform, counts in sorted(summary.items()):
+        platforms = sorted(set(self._scraped_counts) | set(summary))
+        for platform in platforms:
+            counts = summary[platform]
             table.add_row(
                 platform,
+                str(self._scraped_counts[platform]),
                 str(counts["total"]),
                 str(counts["GREEN"]),
                 str(counts["YELLOW"]),
                 str(counts["RED"]),
             )
+        table.add_section()
+        table.add_row(
+            "TOTAL",
+            str(sum(self._scraped_counts.values())),
+            str(sum(counts["total"] for counts in summary.values())),
+            str(sum(counts["GREEN"] for counts in summary.values())),
+            str(sum(counts["YELLOW"] for counts in summary.values())),
+            str(sum(counts["RED"] for counts in summary.values())),
+        )
         console.print(table)
+
+    def _print_sheets_summary(self) -> None:
+        if not self._sheets.enabled:
+            console.print("[yellow]Google Sheets: disabled[/yellow]")
+            return
+
+        stats = self._sheets.stats()
+        table = Table(title="Google Sheets Save Summary", show_lines=True)
+        table.add_column("Platform", style="cyan")
+        table.add_column("Eligible", justify="right")
+        table.add_column("Saved", justify="right", style="green")
+        table.add_column("Duplicates", justify="right", style="yellow")
+        table.add_column("Below Score", justify="right")
+        table.add_column("Pending", justify="right", style="red")
+
+        for platform, counts in sorted(stats.items()):
+            table.add_row(
+                platform,
+                str(counts["eligible"]),
+                str(counts["saved"]),
+                str(counts["duplicates"]),
+                str(counts["below_score"]),
+                str(counts["pending"]),
+            )
+
+        table.add_section()
+        table.add_row(
+            "TOTAL",
+            str(sum(row["eligible"] for row in stats.values())),
+            str(sum(row["saved"] for row in stats.values())),
+            str(sum(row["duplicates"] for row in stats.values())),
+            str(sum(row["below_score"] for row in stats.values())),
+            str(sum(row["pending"] for row in stats.values())),
+        )
+        console.print(table)
+
+    @staticmethod
+    def _event_platform_label(event: KeywordResult) -> str:
+        if event.leads:
+            platform = event.leads[0].platform
+            return PLATFORM_SHEET_MAP.get(platform, platform)
+        return {
+            "upwork": "Upwork",
+            "upwork_selenium": "Upwork",
+            "vollna": "Vollna",
+            "freelancer": "Freelancer",
+            "guru": "Guru",
+            "bark": "Bark.com",
+        }.get(event.platform_worker, event.platform_worker)
 
     def close(self) -> None:
         if self._closed:

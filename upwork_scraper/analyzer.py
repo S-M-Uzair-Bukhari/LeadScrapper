@@ -14,19 +14,20 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────
 # Scoring thresholds (easy to modify)
 # ──────────────────────────────────────────────────────────────
-SCORE_GREEN = 50
-SCORE_YELLOW = 25
+SCORE_GREEN = 70
+SCORE_YELLOW = 50
 
 # Positive scores
 POINTS_WEBSITE = 25
 POINTS_COMPANY_NAME = 15
 POINTS_BUSINESS_EMAIL = 20
 POINTS_GENERAL_EMAIL = 10
-POINTS_DECISION_MAKER = 20
+POINTS_DECISION_MAKER = 10
 POINTS_BUDGET = 10
 POINTS_SERVICE_KEYWORD = 10
 POINTS_LONG_TERM = 10
 POINTS_BUSINESS_CLUE = 10
+POINTS_FULL_DESCRIPTION = 10
 
 # Negative scores
 POINTS_STUDENT = -40
@@ -201,6 +202,7 @@ class LeadAnalysis:
     _found_service: bool = False
     _found_long_term: bool = False
     _found_business_clue: bool = False
+    _found_full_description: bool = False
     _is_student: bool = False
     _is_homework: bool = False
     _is_unpaid: bool = False
@@ -270,6 +272,9 @@ class LeadAnalyzer:
         """Main entry point: analyze a job and return LeadAnalysis."""
         analysis = LeadAnalysis()
         analysis.full_description = description[:2000] if description else ""
+        analysis._found_full_description = bool(
+            description and description.strip()
+        )
         text = f"{title} {description}".strip()
 
         if not text or len(text) < 10:
@@ -876,6 +881,8 @@ class LeadAnalyzer:
             score += POINTS_LONG_TERM
         if a._found_business_clue:
             score += POINTS_BUSINESS_CLUE
+        if a._found_full_description:
+            score += POINTS_FULL_DESCRIPTION
 
         # Negative
         if a._is_student:
@@ -902,42 +909,45 @@ class LeadAnalyzer:
 
     def _classify(self, a: LeadAnalysis):
         """Classify lead priority and build qualification reason."""
-        reasons = []
-
-        # GREEN conditions
-        if a.lead_score >= SCORE_GREEN:
-            reasons.append(f"High score ({a.lead_score}/100)")
+        details = []
         if a._found_website:
-            reasons.append("Company website found")
+            details.append("company website")
         if a._found_business_email:
-            reasons.append("Business email found")
+            details.append("business email")
+        elif a._found_email:
+            details.append("email")
         if a._found_decision_maker:
-            reasons.append(f"Decision-maker: {a.decision_maker_name} ({a.decision_maker_title})")
+            details.append(
+                f"decision-maker {a.decision_maker_name} "
+                f"({a.decision_maker_title})"
+            )
+        if a._found_company:
+            details.append("company name")
+        if a._found_budget:
+            details.append("budget")
+        if a._found_service:
+            details.append("services")
+        if a._found_long_term:
+            details.append("long-term")
+        if a._found_full_description:
+            details.append("description")
 
-        if reasons:
+        if a.lead_score >= SCORE_GREEN:
             a.priority = "GREEN"
-            a.qualification_reason = "; ".join(reasons)
+            suffix = f" — has {', '.join(details)}" if details else ""
+            a.qualification_reason = (
+                f"Score {a.lead_score}/100 — GREEN{suffix}"
+            )
             return
 
-        # YELLOW conditions
         if a.lead_score >= SCORE_YELLOW:
-            details = []
-            if a._found_company:
-                details.append("company name")
-            if a._found_email:
-                details.append("email")
-            if a._found_budget:
-                details.append("budget")
-            if a._found_service:
-                details.append("services")
-            if a._found_long_term:
-                details.append("long-term")
-            if details:
-                a.priority = "YELLOW"
-                a.qualification_reason = f"Score {a.lead_score}/100 — has {', '.join(details)}"
-                return
+            a.priority = "YELLOW"
+            suffix = f" — has {', '.join(details)}" if details else ""
+            a.qualification_reason = (
+                f"Score {a.lead_score}/100 — YELLOW{suffix}"
+            )
+            return
 
-        # RED
         a.priority = "RED"
         negatives = []
         if a._is_student:

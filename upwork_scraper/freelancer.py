@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from urllib.parse import urljoin
 
 from curl_cffi import requests as cffi_requests
 from selectolax.parser import HTMLParser
 
 from .models import JobLead
+from .pipeline.recency_filter import RecencyFilter
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +71,6 @@ class FreelancerScraper:
             )
             skills = [s.text(strip=True) for s in skills_els if s.text(strip=True)]
 
-            days_el = card.css_first(".JobSearchCard-primary-heading-days")
-            time_left = days_el.text(strip=True) if days_el else ""
-
             verified = bool(card.css_first("[class*=verified], [class*=Verified]"))
 
             lead = JobLead(
@@ -80,7 +80,10 @@ class FreelancerScraper:
                 location="",
                 job_type="",
                 budget=budget,
-                posted_date=time_left,
+                # Search cards expose the bid deadline ("6 days left"), not
+                # the posting date. The real value is populated from the job
+                # detail page before the lead is returned.
+                posted_date="",
                 url=job_url,
                 description=description[:500],
                 skills_required=", ".join(skills) if skills else "",
@@ -93,24 +96,150 @@ class FreelancerScraper:
 
         return leads
 
-    def scrape(self, keyword: str, max_results: int = 25) -> list[JobLead]:
+    @classmethod
+    def _parse_posted_date(
+        cls,
+        html: str,
+        now: datetime | None = None,
+    ) -> str:
+        """Extract age from stable project data, not hydrated placeholder text."""
+        start_match = re.search(
+            r'"startTime"\s*:\s*(\d{10,13})',
+            html,
+        )
+        if start_match:
+            raw_timestamp = start_match.group(1)
+            timestamp = int(raw_timestamp)
+            if len(raw_timestamp) > 10:
+                timestamp /= 1000
+            try:
+                posted_at = datetime.fromtimestamp(timestamp, timezone.utc)
+                reference = now or datetime.now(timezone.utc)
+                if reference.tzinfo is None:
+                    reference = reference.replace(tzinfo=timezone.utc)
+                age_seconds = (
+                    reference.astimezone(timezone.utc) - posted_at
+                ).total_seconds()
+                if age_seconds >= 0:
+                    return cls._format_relative_age(age_seconds)
+            except (OSError, OverflowError, ValueError):
+                pass
+
+        # Fallback for older pages that do not embed project startTime.
+        tree = HTMLParser(html)
+        relative_time = tree.css_first("fl-relative-time")
+        return relative_time.text(strip=True) if relative_time else ""
+
+    @staticmethod
+    def _format_relative_age(age_seconds: float) -> str:
+        if age_seconds < 60:
+            amount = max(1, round(age_seconds))
+            unit = "second"
+        elif age_seconds < 3600:
+            amount = max(1, round(age_seconds / 60))
+            unit = "minute"
+        elif age_seconds < 172800:
+            amount = max(1, round(age_seconds / 3600))
+            unit = "hour"
+        else:
+            amount = max(1, round(age_seconds / 86400))
+            unit = "day"
+        suffix = "" if amount == 1 else "s"
+        return f"{amount} {unit}{suffix} ago"
+
+    @classmethod
+    def _fetch_posted_date(cls, job_url: str) -> str:
+        if not job_url:
+            return ""
+        try:
+            response = cffi_requests.get(
+                job_url,
+                impersonate="chrome",
+                timeout=30,
+                headers={
+                    "Accept": "text/html",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+            if response.status_code != 200:
+                logger.warning(
+                    "Freelancer detail: status %d for %s",
+                    response.status_code,
+                    job_url,
+                )
+                return ""
+            return cls._parse_posted_date(response.text)
+        except Exception as exc:
+            logger.warning(
+                "Freelancer detail request failed for %s: %s",
+                job_url,
+                exc,
+            )
+            return ""
+
+    def _populate_posted_dates(self, leads: list[JobLead]) -> None:
+        """Fetch detail dates concurrently without changing result order."""
+        if not leads:
+            return
+        workers = min(5, len(leads))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(self._fetch_posted_date, lead.url): lead
+                for lead in leads
+            }
+            for future in as_completed(futures):
+                futures[future].posted_date = future.result()
+
+    def scrape(
+        self,
+        keyword: str,
+        max_results: int = 25,
+        page_limit: int = 1,
+        recency_hours: float | None = None,
+    ) -> list[JobLead]:
         cat = self._pick_category(keyword)
         url = f"{BASE_URL}{cat}"
-        logger.info("Freelancer: fetching %s", url)
+        leads: list[JobLead] = []
+        seen: set[str] = set()
+        for page in range(1, max(1, page_limit) + 1):
+            logger.info("Freelancer: fetching %s (page %d)", url, page)
+            try:
+                resp = self._session.get(
+                    url,
+                    params={"sort": "latest", "page": page},
+                    timeout=30,
+                    headers={
+                        "Accept": "text/html",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.warning("Freelancer: status %d", resp.status_code)
+                    break
+            except Exception as exc:
+                logger.error("Freelancer: request failed: %s", exc)
+                break
 
-        try:
-            resp = self._session.get(
-                url,
-                timeout=30,
-                headers={"Accept": "text/html", "Accept-Language": "en-US,en;q=0.9"},
-            )
-            if resp.status_code != 200:
-                logger.warning("Freelancer: status %d", resp.status_code)
-                return []
-        except Exception as exc:
-            logger.error("Freelancer: request failed: %s", exc)
-            return []
+            page_leads = self._parse_cards(resp.text, url)
+            new_page_leads: list[JobLead] = []
+            for lead in page_leads:
+                key = lead.url or lead.title
+                if key not in seen:
+                    seen.add(key)
+                    new_page_leads.append(lead)
+                    if len(leads) + len(new_page_leads) >= max_results:
+                        break
+            self._populate_posted_dates(new_page_leads)
+            leads.extend(new_page_leads)
+            if (
+                len(leads) >= max_results
+                or not page_leads
+                or RecencyFilter.page_reaches_boundary(
+                    new_page_leads,
+                    recency_hours,
+                )
+            ):
+                break
 
-        leads = self._parse_cards(resp.text, url)
         logger.info("Freelancer: parsed %d jobs", len(leads))
         return leads[:max_results]

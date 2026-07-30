@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
@@ -37,7 +38,82 @@ class SQLiteLeadRepository:
             )
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_date TEXT NOT NULL,
+                run_number INTEGER NOT NULL,
+                run_id TEXT NOT NULL UNIQUE,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                UNIQUE(run_date, run_number)
+            )
+            """
+        )
+        columns = {
+            row[1]
+            for row in self._connection.execute(
+                "PRAGMA table_info(daily_runs)"
+            ).fetchall()
+        }
+        if "completed_at" not in columns:
+            self._connection.execute(
+                "ALTER TABLE daily_runs ADD COLUMN completed_at TEXT"
+            )
         self._connection.commit()
+
+    def latest_completed_at(self) -> str | None:
+        """Return the most recent successful run completion timestamp."""
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT completed_at
+                FROM daily_runs
+                WHERE completed_at IS NOT NULL
+                ORDER BY completed_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def claim_daily_run(self, run_date: str, started_at: str) -> int:
+        """Atomically reserve and return this local day's run number."""
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                """
+                SELECT COALESCE(MAX(run_number), 0)
+                FROM daily_runs
+                WHERE run_date = ?
+                """,
+                (run_date,),
+            ).fetchone()
+            run_number = int(row[0]) + 1
+            self._connection.execute(
+                """
+                INSERT INTO daily_runs (
+                    run_date, run_number, run_id, started_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (run_date, run_number, self.run_id, started_at),
+            )
+            self._connection.commit()
+            return run_number
+
+    def mark_run_completed(self, completed_at: str | None = None) -> None:
+        """Mark this run complete so future runs can calculate a catch-up gap."""
+        timestamp = completed_at or datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._connection.execute(
+                """
+                UPDATE daily_runs
+                SET completed_at = ?
+                WHERE run_id = ?
+                """,
+                (timestamp, self.run_id),
+            )
+            self._connection.commit()
 
     def save(
         self,

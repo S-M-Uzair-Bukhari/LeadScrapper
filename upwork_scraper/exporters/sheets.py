@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, TypeVar
@@ -15,7 +16,9 @@ from gspread.utils import rowcol_to_a1
 from ..config import ScraperConfig
 from ..pipeline.processor import ProcessedLead
 from ..storage.sqlite_repository import SQLiteLeadRepository
+from ..timezones import resolve_timezone
 from .rows import processed_lead_to_row
+from .sheet_operations import prepend_rows_requests
 from .schema import (
     COLUMN_WIDTHS,
     COLOR_GREEN,
@@ -43,7 +46,12 @@ class _BufferedLead:
 class _WorksheetState:
     worksheet: object
     titles: set[str]
-    next_row: int
+
+
+@dataclass
+class _AppendResult:
+    saved: list[_BufferedLead]
+    duplicates: list[_BufferedLead]
 
 
 class SheetsBatchWriter:
@@ -63,15 +71,33 @@ class SheetsBatchWriter:
         self._spreadsheet = None
         self._next_write_at = 0.0
         self._retry_not_before: dict[str, float] = defaultdict(float)
+        self._stats: dict[str, Counter] = defaultdict(Counter)
+        self._recorded_primary_outcomes: set[tuple[str, str]] = set()
         self._sleep = time.sleep
         self._monotonic = time.monotonic
 
     def add(self, item: ProcessedLead, dedup_key: str) -> None:
         if not self.enabled:
             return
-        sheet_name = PLATFORM_SHEET_MAP.get(
-            item.lead.platform, item.lead.platform or "Other"
+        platform_label = self._platform_label(item)
+        minimum_score = getattr(
+            self.config, "sheets_min_lead_score", 30
         )
+        if item.analysis.lead_score < minimum_score:
+            self._stats[platform_label]["below_score"] += 1
+            logger.debug(
+                "Skipping Sheets upload for '%s': score %d is below %d.",
+                item.lead.title,
+                item.analysis.lead_score,
+                minimum_score,
+            )
+            return
+        sheet_name = getattr(
+            self.config,
+            "google_sheet_tab",
+            "Leads",
+        )
+        self._stats[platform_label]["eligible"] += 1
         self._buffers[sheet_name].append(_BufferedLead(item, dedup_key))
         if (
             len(self._buffers[sheet_name]) >= self.batch_size
@@ -82,7 +108,7 @@ class SheetsBatchWriter:
     def flush_platform(self, platform_label: str) -> None:
         if not self.enabled:
             return
-        sheet_name = PLATFORM_SHEET_MAP.get(platform_label, platform_label)
+        sheet_name = getattr(self.config, "google_sheet_tab", "Leads")
         if sheet_name in self._buffers:
             self._flush_sheet(sheet_name, force=True)
 
@@ -91,6 +117,25 @@ class SheetsBatchWriter:
             return
         for sheet_name in list(self._buffers):
             self._flush_sheet(sheet_name, force=True)
+
+    def stats(self) -> dict[str, dict[str, int]]:
+        """Return per-platform run outcomes for console reporting."""
+        pending: Counter = Counter()
+        for buffer in self._buffers.values():
+            for entry in buffer:
+                pending[self._platform_label(entry.item)] += 1
+        platform_names = set(self._stats) | set(pending)
+        result: dict[str, dict[str, int]] = {}
+        for platform_name in platform_names:
+            counts = self._stats[platform_name]
+            result[platform_name] = {
+                "eligible": counts["eligible"],
+                "saved": counts["saved"],
+                "duplicates": counts["duplicates"],
+                "below_score": counts["below_score"],
+                "pending": pending[platform_name],
+            }
+        return result
 
     def _connect(self) -> None:
         if self._spreadsheet is not None:
@@ -269,14 +314,13 @@ class SheetsBatchWriter:
         headers = [value.casefold().strip() for value in values[0]]
         title_index = headers.index("job title") if "job title" in headers else 0
         titles = {
-            row[title_index]
+            self._title_key(row[title_index])
             for row in values[1:]
             if len(row) > title_index and row[title_index]
         }
         state = _WorksheetState(
             worksheet=worksheet,
             titles=titles,
-            next_row=len(values) + 1,
         )
         self._states[name] = state
         return state
@@ -402,9 +446,11 @@ class SheetsBatchWriter:
         batch = buffer[:count]
 
         try:
-            date_label = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            self._append_to_tab(sheet_name, batch)
-            self._append_to_tab(f"{sheet_name} {date_label}", batch)
+            primary_result = self._append_to_tab(sheet_name, batch)
+            newly_saved, newly_duplicated = self._record_primary_result(
+                sheet_name,
+                primary_result,
+            )
         except Exception as exc:
             logger.error(
                 "Sheets batch upload failed for %s (%d leads): %s",
@@ -424,42 +470,102 @@ class SheetsBatchWriter:
         del buffer[:count]
         self.repository.mark_uploaded([entry.dedup_key for entry in batch])
         logger.info(
-            "Uploaded %d qualified leads to %s Sheets tabs.",
-            len(batch),
+            "Google Sheets tab %s: %d newly saved, %d duplicates "
+            "(%d eligible processed).",
             sheet_name,
+            newly_saved,
+            newly_duplicated,
+            len(batch),
         )
 
     def _append_to_tab(
         self, tab_name: str, batch: list[_BufferedLead]
-    ) -> None:
+    ) -> _AppendResult:
         state = self._worksheet_state(tab_name)
         new_entries = [
-            entry for entry in batch if entry.item.lead.title not in state.titles
+            entry
+            for entry in batch
+            if self._title_key(entry.item.lead.title) not in state.titles
+        ]
+        new_ids = {id(entry) for entry in new_entries}
+        duplicates = [
+            entry for entry in batch if id(entry) not in new_ids
         ]
         if not new_entries:
-            return
+            return _AppendResult([], duplicates)
+        new_entries.sort(
+            key=lambda entry: entry.item.lead.scraped_at,
+            reverse=True,
+        )
 
         sheet_saved_at = datetime.now(timezone.utc)
+        display_timezone = resolve_timezone(
+            getattr(self.config, "local_timezone", "Asia/Karachi")
+        )
         rows = [
             [
                 processed_lead_to_row(
                     entry.item,
                     sheet_saved_at=sheet_saved_at,
+                    display_timezone=display_timezone,
                 )[header]
                 for header in SHEET_HEADERS
             ]
             for entry in new_entries
         ]
-        start_row = state.next_row
+        start_row = 2
+        requests = prepend_rows_requests(
+            state.worksheet.id,
+            rows,
+            start_row_index=1,
+        )
         self._write(
-            f"append {len(rows)} rows to {tab_name}",
-            lambda: state.worksheet.append_rows(
-                rows, value_input_option="USER_ENTERED"
+            f"prepend {len(rows)} rows to {tab_name}",
+            lambda: state.worksheet.spreadsheet.batch_update(
+                {"requests": requests}
             ),
         )
-        state.next_row += len(rows)
-        state.titles.update(entry.item.lead.title for entry in new_entries)
+        state.titles.update(
+            self._title_key(entry.item.lead.title)
+            for entry in new_entries
+        )
         self._format_rows(state.worksheet, start_row, new_entries)
+        return _AppendResult(new_entries, duplicates)
+
+    def _record_primary_result(
+        self,
+        sheet_name: str,
+        result: _AppendResult,
+    ) -> tuple[int, int]:
+        newly_saved = 0
+        newly_duplicated = 0
+        for outcome, entries in (
+            ("saved", result.saved),
+            ("duplicates", result.duplicates),
+        ):
+            for entry in entries:
+                key = (sheet_name, entry.dedup_key)
+                if key in self._recorded_primary_outcomes:
+                    continue
+                self._recorded_primary_outcomes.add(key)
+                platform_label = self._platform_label(entry.item)
+                self._stats[platform_label][outcome] += 1
+                if outcome == "saved":
+                    newly_saved += 1
+                else:
+                    newly_duplicated += 1
+        return newly_saved, newly_duplicated
+
+    @staticmethod
+    def _title_key(title: str) -> str:
+        return re.sub(r"\s+", " ", title).strip().casefold()
+
+    @staticmethod
+    def _platform_label(item: ProcessedLead) -> str:
+        return PLATFORM_SHEET_MAP.get(
+            item.lead.platform,
+            item.lead.platform or "Other",
+        )
 
     def _format_rows(
         self,
@@ -510,5 +616,3 @@ class SheetsBatchWriter:
                 logger.warning(
                     "Row formatting failed for %s: %s", worksheet.title, exc
                 )
-                if self._is_retryable(exc):
-                    raise

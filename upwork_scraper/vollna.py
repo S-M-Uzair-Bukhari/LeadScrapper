@@ -39,7 +39,9 @@ class VollnaScraper:
         if not xml_data:
             return []
 
-        return self._parse_jobs(xml_data, keyword)
+        return self._parse_jobs(
+            xml_data, keyword
+        )[:self.config.max_results_per_keyword]
 
     def _fetch(self, url: str) -> Optional[str]:
         for attempt in range(1, self.config.max_retries + 1):

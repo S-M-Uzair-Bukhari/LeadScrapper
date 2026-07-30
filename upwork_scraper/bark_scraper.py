@@ -16,6 +16,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from .browser_cleanup import close_chrome_safely
 from .config import ScraperConfig
 from .models import JobLead
 
@@ -92,7 +93,9 @@ class BarkScraper:
 
         self._search_on_dashboard(driver, "")
         try:
-            self._scroll_to_load(driver)
+            self._scroll_to_load(
+                driver, max_scrolls=self.config.page_limit
+            )
         except WebDriverException:
             logger.warning("Scroll failed.")
 
@@ -136,10 +139,7 @@ class BarkScraper:
 
     def close(self):
         if self._driver:
-            try:
-                self._driver.quit()
-            except Exception:
-                pass
+            close_chrome_safely(self._driver)
             self._driver = None
             logger.info("Browser closed.")
 
@@ -154,10 +154,7 @@ class BarkScraper:
                 return self._driver
             except Exception:
                 logger.info("Browser session lost, recreating...")
-                try:
-                    self._driver.quit()
-                except Exception:
-                    pass
+                close_chrome_safely(self._driver)
                 self._driver = None
         logger.info("Launching Chrome via undetected_chromedriver...")
         options = uc.ChromeOptions()
@@ -311,7 +308,9 @@ class BarkScraper:
             time.sleep(4)
 
         try:
-            self._scroll_to_load(driver)
+            self._scroll_to_load(
+                driver, max_scrolls=self.config.page_limit
+            )
         except WebDriverException as exc:
             logger.warning("Scroll failed (session may have died): %s", exc)
             return []
