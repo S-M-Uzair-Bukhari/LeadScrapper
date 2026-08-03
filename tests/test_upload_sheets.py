@@ -169,6 +169,45 @@ class UploadSheetLayoutTests(unittest.TestCase):
         ]
         self.assertEqual(len(column_requests), len(COLUMN_WIDTHS))
 
+    def test_runtime_writer_groups_leads_by_local_found_date(self) -> None:
+        writer = SheetsBatchWriter(
+            SimpleNamespace(
+                google_sheet_id="test",
+                sheets_batch_size=10,
+                sheets_min_lead_score=30,
+                sheets_min_write_interval=0,
+                local_timezone="Asia/Karachi",
+            ),
+            _RepositoryFake(),
+        )
+        analysis = LeadAnalysis(priority="YELLOW", lead_score=50)
+
+        writer.add(
+            ProcessedLead(
+                JobLead(
+                    title="August 3 lead",
+                    platform="Upwork",
+                    scraped_at="2026-08-02T20:30:00+00:00",
+                ),
+                analysis,
+            ),
+            "august-3",
+        )
+        writer.add(
+            ProcessedLead(
+                JobLead(
+                    title="August 4 lead",
+                    platform="Upwork",
+                    scraped_at="2026-08-03T20:30:00+00:00",
+                ),
+                analysis,
+            ),
+            "august-4",
+        )
+
+        self.assertEqual(len(writer._buffers["03-08-2026"]), 1)
+        self.assertEqual(len(writer._buffers["04-08-2026"]), 1)
+
     def test_prepend_request_inserts_below_header_in_given_order(self) -> None:
         requests = prepend_rows_requests(
             123,
@@ -202,7 +241,8 @@ class UploadSheetLayoutTests(unittest.TestCase):
             _RepositoryFake(),
         )
         worksheet = _WorksheetFake([SHEET_HEADERS, ["Existing Lead"]])
-        writer._states["Leads"] = _WorksheetState(
+        date_tab = "03-08-2026"
+        writer._states[date_tab] = _WorksheetState(
             worksheet=worksheet,
             titles={"existing lead"},
         )
@@ -212,31 +252,43 @@ class UploadSheetLayoutTests(unittest.TestCase):
         below_score = LeadAnalysis(priority="RED", lead_score=29)
         writer.add(
             ProcessedLead(
-                JobLead(title="Existing Lead", platform="Upwork"),
+                JobLead(
+                    title="Existing Lead",
+                    platform="Upwork",
+                    scraped_at="2026-08-03T12:00:00+00:00",
+                ),
                 eligible,
             ),
             "existing",
         )
         writer.add(
             ProcessedLead(
-                JobLead(title="New Lead", platform="Upwork"),
+                JobLead(
+                    title="New Lead",
+                    platform="Upwork",
+                    scraped_at="2026-08-03T12:00:00+00:00",
+                ),
                 eligible,
             ),
             "new",
         )
         writer.add(
             ProcessedLead(
-                JobLead(title="Below Score", platform="Upwork"),
+                JobLead(
+                    title="Below Score",
+                    platform="Upwork",
+                    scraped_at="2026-08-03T12:00:00+00:00",
+                ),
                 below_score,
             ),
             "below",
         )
 
         result = writer._append_to_tab(
-            "Leads",
-            writer._buffers["Leads"],
+            date_tab,
+            writer._buffers[date_tab],
         )
-        writer._record_primary_result("Leads", result)
+        writer._record_primary_result(date_tab, result)
         stats = writer.stats()["Upwork"]
 
         self.assertEqual(stats["eligible"], 2)

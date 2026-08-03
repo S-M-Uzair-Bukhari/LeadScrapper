@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from urllib.parse import urljoin
 
 from curl_cffi import requests as cffi_requests
@@ -53,6 +54,30 @@ class GuruScraper:
             return GURU_SKILLS[kw]
         return re.sub(r"[^a-z0-9]+", "-", kw).strip("-")
 
+    @staticmethod
+    def _parse_posted_date(
+        meta: str,
+        now: datetime | None = None,
+    ) -> str:
+        """Return Guru posting metadata as an absolute calendar date."""
+        match = re.search(
+            r"\bPosted\s+(?:on\s+)?(.+?)(?:\s*[\u00b7]|$)",
+            meta,
+            re.IGNORECASE,
+        )
+        if not match:
+            return ""
+
+        value = match.group(1).strip().rstrip("\u00c2").strip()
+        # Guru abbreviates relative units as ``hrs`` and ``mins``. Normalize
+        # them to forms understood by the shared date parser, but keep this
+        # conversion local to Guru.
+        value = re.sub(r"\bhrs?\b", "hours", value, flags=re.IGNORECASE)
+        value = re.sub(r"\bmins?\b", "minutes", value, flags=re.IGNORECASE)
+        value = re.sub(r"\bsecs?\b", "seconds", value, flags=re.IGNORECASE)
+        posted_at = RecencyFilter.parse_posted_at(value, now)
+        return posted_at.strftime("%b %d, %Y") if posted_at else ""
+
     def _parse_records(self, html: str) -> list[JobLead]:
         tree = HTMLParser(html)
         leads: list[JobLead] = []
@@ -89,12 +114,9 @@ class GuruScraper:
             clean_href = re.split(r"[?&]", href, maxsplit=1)[0]
             job_id_match = re.search(r"/(\d+)/?$", clean_href)
 
-            posted = ""
+            posted = self._parse_posted_date(meta)
             quotes = ""
             if meta:
-                m_posted = re.search(r"on\s+(.+?)(?:\u00b7|$)", meta)
-                if m_posted:
-                    posted = m_posted.group(1).strip()
                 m_quotes = re.search(r"(\d+)\s*Quotes?\s*Received", meta)
                 if m_quotes:
                     quotes = m_quotes.group(1)

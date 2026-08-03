@@ -5,6 +5,7 @@ import os
 import logging
 import time
 from pathlib import Path
+from datetime import date, datetime
 
 import gspread
 from gspread.utils import rowcol_to_a1
@@ -27,7 +28,10 @@ SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 CREDS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service-account.json")
 CSV_PATH = "output/leads_20260716_211534.csv"
 MIN_LEAD_SCORE = 30
-SHEET_TAB = os.getenv("GOOGLE_SHEET_TAB", "Leads")
+
+# Google Sheets does not allow "/" in worksheet titles, so date tabs use the
+# equivalent unambiguous format "dd-mm-yyyy" (for example, "03-08-2026").
+TAB_DATE_FORMAT = "%d-%m-%Y"
 
 PLATFORM_SHEET_MAP = {
     "Bark.com": "Bark.com",
@@ -186,6 +190,31 @@ def _is_sheet_eligible(row: dict) -> bool:
     return lead_score >= MIN_LEAD_SCORE
 
 
+def _lead_date(value: str, fallback: date) -> date:
+    """Return the calendar date stored in a Lead Found At value."""
+    value = (value or "").strip()
+    if not value:
+        return fallback
+
+    # Current exports are ISO 8601; older exports used a display timestamp.
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        pass
+
+    for timestamp_format in ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value, timestamp_format).date()
+        except ValueError:
+            continue
+
+    logging.warning(
+        "Could not parse Lead Found At %r; using the upload date instead.",
+        value,
+    )
+    return fallback
+
+
 def main():
     if not SHEET_ID:
         print("GOOGLE_SHEET_ID not set in .env")
@@ -206,7 +235,14 @@ def main():
     gc = gspread.authorize(creds)
     sheet = gc.open_by_key(SHEET_ID)
 
-    grouped = {SHEET_TAB: rows}
+    # Group leads by the day they were found, creating one worksheet per day.
+    upload_date = datetime.now().astimezone().date()
+    grouped = {}
+    for row in rows:
+        found_date = _lead_date(row.get("Lead Found At", ""), upload_date)
+        tab_name = found_date.strftime(TAB_DATE_FORMAT)
+        grouped.setdefault(tab_name, []).append(row)
+
     for sheet_name, leads in grouped.items():
         print(f"\n{sheet_name}: {len(leads)} leads")
         try:

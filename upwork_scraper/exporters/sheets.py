@@ -98,11 +98,7 @@ class SheetsBatchWriter:
                 minimum_score,
             )
             return
-        sheet_name = getattr(
-            self.config,
-            "google_sheet_tab",
-            "Leads",
-        )
+        sheet_name = self._sheet_name(item)
         self._stats[platform_label]["eligible"] += 1
         self._buffers[sheet_name].append(_BufferedLead(item, dedup_key))
         if (
@@ -115,8 +111,9 @@ class SheetsBatchWriter:
         with self._lock:
             if not self.enabled:
                 return
-            sheet_name = getattr(self.config, "google_sheet_tab", "Leads")
-            if sheet_name in self._buffers:
+            # Leads may span more than one local calendar date, so flush every
+            # date buffer. Empty buffers are ignored by _flush_sheet().
+            for sheet_name in list(self._buffers):
                 self._flush_sheet(sheet_name, force=True)
 
     def flush_all(self) -> None:
@@ -578,6 +575,27 @@ class SheetsBatchWriter:
             item.lead.platform,
             item.lead.platform or "Other",
         )
+
+    def _sheet_name(self, item: ProcessedLead) -> str:
+        """Return the lead's local date as a valid Google Sheets tab name."""
+        value = (item.lead.scraped_at or "").strip()
+        try:
+            found_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if found_at.tzinfo is None:
+                found_at = found_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            logger.warning(
+                "Invalid scraped_at timestamp %r for '%s'; using current time.",
+                value,
+                item.lead.title,
+            )
+            found_at = datetime.now(timezone.utc)
+
+        local_timezone = resolve_timezone(
+            getattr(self.config, "local_timezone", "Asia/Karachi")
+        )
+        # A slash is not valid in a worksheet title, hence dd-mm-yyyy.
+        return found_at.astimezone(local_timezone).strftime("%d-%m-%Y")
 
     def _format_rows(
         self,

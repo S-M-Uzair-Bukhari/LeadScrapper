@@ -50,6 +50,9 @@ class _SheetsWriterProbe(SheetsBatchWriter):
     def _flush_sheet(self, sheet_name: str, limit: int | None = None) -> None:
         self.flush_calls.append((sheet_name, limit))
 
+    def _sheet_name(self, item: ProcessedLead) -> str:
+        return "Leads"
+
 
 class _QuotaError(Exception):
     code = 429
@@ -75,6 +78,9 @@ class _FailingSheetsWriter(SheetsBatchWriter):
     def _append_to_tab(self, tab_name: str, batch: list) -> None:
         self.append_attempts += 1
         raise _QuotaError()
+
+    def _sheet_name(self, item: ProcessedLead) -> str:
+        return "Leads"
 
 
 class StructuralPipelineTests(unittest.TestCase):
