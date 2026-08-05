@@ -595,7 +595,8 @@ class SheetsBatchWriter:
             getattr(self.config, "local_timezone", "Asia/Karachi")
         )
         # A slash is not valid in a worksheet title, hence dd-mm-yyyy.
-        return found_at.astimezone(local_timezone).strftime("%d-%m-%Y")
+        date_label = found_at.astimezone(local_timezone).strftime("%d-%m-%Y")
+        return f"Leads {date_label}"
 
     def _format_rows(
         self,

@@ -30,7 +30,7 @@ CSV_PATH = "output/leads_20260716_211534.csv"
 MIN_LEAD_SCORE = 30
 
 # Google Sheets does not allow "/" in worksheet titles, so date tabs use the
-# equivalent unambiguous format "dd-mm-yyyy" (for example, "03-08-2026").
+# equivalent unambiguous format (for example, "Leads 03-08-2026").
 TAB_DATE_FORMAT = "%d-%m-%Y"
 
 PLATFORM_SHEET_MAP = {
@@ -240,7 +240,7 @@ def main():
     grouped = {}
     for row in rows:
         found_date = _lead_date(row.get("Lead Found At", ""), upload_date)
-        tab_name = found_date.strftime(TAB_DATE_FORMAT)
+        tab_name = f"Leads {found_date.strftime(TAB_DATE_FORMAT)}"
         grouped.setdefault(tab_name, []).append(row)
 
     for sheet_name, leads in grouped.items():

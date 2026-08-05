@@ -205,8 +205,8 @@ class UploadSheetLayoutTests(unittest.TestCase):
             "august-4",
         )
 
-        self.assertEqual(len(writer._buffers["03-08-2026"]), 1)
-        self.assertEqual(len(writer._buffers["04-08-2026"]), 1)
+        self.assertEqual(len(writer._buffers["Leads 03-08-2026"]), 1)
+        self.assertEqual(len(writer._buffers["Leads 04-08-2026"]), 1)
 
     def test_prepend_request_inserts_below_header_in_given_order(self) -> None:
         requests = prepend_rows_requests(
@@ -241,7 +241,7 @@ class UploadSheetLayoutTests(unittest.TestCase):
             _RepositoryFake(),
         )
         worksheet = _WorksheetFake([SHEET_HEADERS, ["Existing Lead"]])
-        date_tab = "03-08-2026"
+        date_tab = "Leads 03-08-2026"
         writer._states[date_tab] = _WorksheetState(
             worksheet=worksheet,
             titles={"existing lead"},
