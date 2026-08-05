@@ -134,6 +134,49 @@ python -m pip install -r requirements.txt
 
 Chrome is required for the authenticated Upwork and Bark workers.
 
+## Running with Docker
+
+The Docker image includes Python, Chromium, and a virtual display for the
+Selenium workers. Docker Compose also persists the SQLite database and local
+exports in the host's `data/` and `output/` directories.
+
+1. Copy `.env.example` to `.env` and add the credentials you need.
+2. Put the Google service-account key at `service-account.json`. When Sheets
+   is disabled, an empty placeholder file is sufficient for the Compose mount.
+3. Build and run one collection cycle.
+
+### Docker Compose commands
+
+Build the image and start the scraper:
+
+```powershell
+docker compose up --build
+```
+
+Run only the Freelancer and Guru platforms:
+
+```powershell
+docker compose run --rm scraper -p freelancer guru
+```
+
+Run those platforms once with a limit of 20 results per keyword:
+
+```powershell
+docker compose run --rm scraper -p freelancer guru --runs 1 -r 20
+```
+
+Run without Compose (Google Sheets is disabled unless its environment and
+credential volume are supplied explicitly):
+
+```powershell
+docker build -t lead-generator .
+docker run --rm --env-file .env -v "${PWD}/data:/app/data" -v "${PWD}/output:/app/output" --shm-size=2g lead-generator --runs 1
+```
+
+On Linux, ensure `data/` and `output/` are writable by container user UID
+`10001`. To stop a continuous or multi-run session, use `Ctrl+C` or
+`docker compose down`.
+
 ## Environment configuration
 
 Create a `.env` file in the project root:

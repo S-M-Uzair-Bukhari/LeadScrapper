@@ -8,6 +8,7 @@ import re
 import time
 import json
 import logging
+import os
 from urllib.parse import urlencode
 from datetime import datetime, timezone
 from threading import Lock
@@ -222,12 +223,20 @@ class UpworkSeleniumScraper:
                 "--disable-blink-features=AutomationControlled"
             )
             options.add_argument("--start-maximized")
-            try:
-                from webdriver_manager.chrome import ChromeDriverManager
-                ChromeDriverManager().install()
-            except Exception:
-                pass
-            self._driver = uc.Chrome(version_main=150, options=options)
+            if os.getenv("RUNNING_IN_CONTAINER") == "1":
+                options.add_argument("--no-sandbox")
+                options.add_argument("--disable-dev-shm-usage")
+            version = os.getenv("CHROME_VERSION_MAIN")
+            driver_path = os.getenv("CHROMEDRIVER_PATH")
+            browser_path = os.getenv("CHROME_BINARY")
+            launch_options: dict[str, object] = {"options": options}
+            if version:
+                launch_options["version_main"] = int(version)
+            if driver_path:
+                launch_options["driver_executable_path"] = driver_path
+            if browser_path:
+                launch_options["browser_executable_path"] = browser_path
+            self._driver = uc.Chrome(**launch_options)
         self._driver.set_page_load_timeout(120)
         client_config = getattr(
             self._driver.command_executor,

@@ -1,0 +1,14 @@
+services:
+  scraper:
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      GOOGLE_CREDENTIALS_PATH: /run/secrets/google-service-account.json
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./service-account.json:/run/secrets/google-service-account.json:ro
+    shm_size: 2gb
+    command: ["--runs", "1"]
