@@ -33,8 +33,10 @@ COPY upwork_scraper ./upwork_scraper
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN cp /usr/bin/chromedriver /opt/undetected_chromedriver \
+    && sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
     && chmod +x /usr/local/bin/docker-entrypoint.sh \
-    && mkdir -p /app/data /app/output /app/browser-profiles \
+    && mkdir -p /app/data /app/output /app/browser-profiles /tmp/.X11-unix \
+    && chmod 1777 /tmp/.X11-unix \
     && useradd --create-home --uid 10001 scraper \
     && chown -R scraper:scraper \
         /app /home/scraper /opt/undetected_chromedriver \
@@ -44,5 +46,5 @@ USER scraper
 
 VOLUME ["/app/data", "/app/output", "/app/browser-profiles"]
 
-ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/bin/sh", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["--runs", "1"]
