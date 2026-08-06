@@ -14,8 +14,11 @@ RUN apt-get update \
         chromium \
         chromium-driver \
         fonts-liberation \
+        novnc \
         tini \
+        websockify \
         xauth \
+        x11vnc \
         xvfb \
     && rm -rf /var/lib/apt/lists/*
 
@@ -27,16 +30,19 @@ RUN python -m pip install --no-cache-dir --upgrade setuptools \
 
 COPY main.py ./
 COPY upwork_scraper ./upwork_scraper
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN cp /usr/bin/chromedriver /opt/undetected_chromedriver \
-    && mkdir -p /app/data /app/output \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && mkdir -p /app/data /app/output /app/browser-profiles \
     && useradd --create-home --uid 10001 scraper \
     && chown -R scraper:scraper \
-        /app /home/scraper /opt/undetected_chromedriver
+        /app /home/scraper /opt/undetected_chromedriver \
+        /app/browser-profiles
 
 USER scraper
 
-VOLUME ["/app/data", "/app/output"]
+VOLUME ["/app/data", "/app/output", "/app/browser-profiles"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/xvfb-run", "-a", "python", "main.py"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["--runs", "1"]

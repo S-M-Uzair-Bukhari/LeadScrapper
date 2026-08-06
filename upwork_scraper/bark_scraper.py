@@ -18,6 +18,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from .browser_cleanup import close_chrome_safely
+from .chrome_runtime import chrome_launch_options
 from .config import ScraperConfig
 from .models import JobLead
 
@@ -164,16 +165,8 @@ class BarkScraper:
         if os.getenv("RUNNING_IN_CONTAINER") == "1":
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
-        version = os.getenv("CHROME_VERSION_MAIN")
-        driver_path = os.getenv("CHROMEDRIVER_PATH")
-        browser_path = os.getenv("CHROME_BINARY")
         launch_options: dict[str, object] = {"options": options}
-        if version:
-            launch_options["version_main"] = int(version)
-        if driver_path:
-            launch_options["driver_executable_path"] = driver_path
-        if browser_path:
-            launch_options["browser_executable_path"] = browser_path
+        launch_options.update(chrome_launch_options())
         self._driver = uc.Chrome(**launch_options)
         self._driver.set_page_load_timeout(120)
         return self._driver

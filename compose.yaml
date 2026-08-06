@@ -5,10 +5,18 @@ services:
     env_file:
       - .env
     environment:
+      CHROME_PROFILE_ROOT: /app/browser-profiles
       GOOGLE_CREDENTIALS_PATH: /run/secrets/google-service-account.json
+    ports:
+      - "127.0.0.1:7900:7900"
     volumes:
-      - ./data:/app/data
+      - scraper_data:/app/data
       - ./output:/app/output
       - ./service-account.json:/run/secrets/google-service-account.json:ro
+      - browser_profiles:/app/browser-profiles
     shm_size: 2gb
     command: ["--runs", "1"]
+
+volumes:
+  browser_profiles:
+  scraper_data:

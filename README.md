@@ -132,7 +132,11 @@ Python 3.10 or newer is recommended.
 python -m pip install -r requirements.txt
 ```
 
-Chrome is required for the authenticated Upwork and Bark workers.
+Chrome is required for the authenticated Upwork and Bark workers. Local runs
+detect the installed Chrome major version automatically so
+`undetected-chromedriver` downloads a compatible driver. For nonstandard
+installations, set `CHROME_BINARY` and, only if detection still fails,
+`CHROME_VERSION_MAIN` in `.env`.
 
 ## Running with Docker
 
@@ -152,6 +156,24 @@ Build the image and start the scraper:
 ```powershell
 docker compose up --build
 ```
+
+While the scraper is running, open
+[`http://localhost:7900/vnc.html`](http://localhost:7900/vnc.html) to view and
+interact with Chromium inside Docker. The port is bound to localhost only.
+Docker keeps a separate Chrome profile for each browser worker in the named
+`browser_profiles` volume, so Upwork login and verification state survives
+container replacement without concurrent workers locking the same profile.
+
+If Upwork displays a Cloudflare verification page, complete it in the browser
+view within the configured `UPWORK_VERIFICATION_TIMEOUT` (180 seconds by
+default). The scraper detects this page and waits instead of incorrectly
+reporting that it is already logged in. A visible browser does not itself
+bypass Upwork's verification; it provides the interactive session needed to
+complete it legitimately.
+
+The SQLite database uses the Docker-managed `scraper_data` volume because
+SQLite WAL files are unreliable on Docker Desktop's Windows bind mounts.
+Exports remain available directly in the host `output/` directory.
 
 Run only the Freelancer and Guru platforms:
 

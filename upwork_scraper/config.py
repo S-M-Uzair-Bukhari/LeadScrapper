@@ -326,6 +326,9 @@ class ScraperConfig:
     selenium_max_scrolls: int = 8
     selenium_command_timeout: float = 45.0
     upwork_location_timeout: int = 12
+    upwork_verification_timeout: int = int(
+        os.getenv("UPWORK_VERIFICATION_TIMEOUT", "180")
+    )
 
     # Bark.com
     bark_username: str = os.getenv("BARK_USERNAME", "")

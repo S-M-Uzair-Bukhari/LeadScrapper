@@ -23,6 +23,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .config import ScraperConfig
 from .browser_cleanup import close_chrome_safely, discard_chrome_safely
+from .chrome_runtime import chrome_launch_options
 from .models import JobLead
 from .pipeline.recency_filter import RecencyFilter
 
@@ -226,16 +227,8 @@ class UpworkSeleniumScraper:
             if os.getenv("RUNNING_IN_CONTAINER") == "1":
                 options.add_argument("--no-sandbox")
                 options.add_argument("--disable-dev-shm-usage")
-            version = os.getenv("CHROME_VERSION_MAIN")
-            driver_path = os.getenv("CHROMEDRIVER_PATH")
-            browser_path = os.getenv("CHROME_BINARY")
             launch_options: dict[str, object] = {"options": options}
-            if version:
-                launch_options["version_main"] = int(version)
-            if driver_path:
-                launch_options["driver_executable_path"] = driver_path
-            if browser_path:
-                launch_options["browser_executable_path"] = browser_path
+            launch_options.update(chrome_launch_options())
             self._driver = uc.Chrome(**launch_options)
         self._driver.set_page_load_timeout(120)
         client_config = getattr(
@@ -277,6 +270,25 @@ class UpworkSeleniumScraper:
         driver.get(search_url)
         time.sleep(3)
 
+        if self._is_verification_page(driver):
+            timeout = max(1, self.config.upwork_verification_timeout)
+            logger.warning(
+                "Upwork verification is required. Open "
+                "http://localhost:7900/vnc.html and complete it within "
+                "%d seconds.",
+                timeout,
+            )
+            try:
+                WebDriverWait(driver, timeout).until_not(
+                    self._is_verification_page
+                )
+            except TimeoutException:
+                logger.error(
+                    "Upwork verification was not completed within %d seconds.",
+                    timeout,
+                )
+                return False
+
         if "upwork.com/nx/" in driver.current_url:
             logger.info("Already logged in.")
             return True
@@ -309,6 +321,19 @@ class UpworkSeleniumScraper:
 
         logger.warning("Login not confirmed within timeout.")
         return False
+
+    @staticmethod
+    def _is_verification_page(driver) -> bool:
+        try:
+            title = (driver.title or "").casefold()
+            body = driver.find_element(By.TAG_NAME, "body").text.casefold()
+        except Exception:
+            return False
+        return (
+            "just a moment" in title
+            or "cloudflare ray id" in body
+            or "verify you are human" in body
+        )
 
     @staticmethod
     def _input_if_present(driver, selectors, value, timeout=8, submit=True):
@@ -508,7 +533,19 @@ class UpworkSeleniumScraper:
                 EC.presence_of_all_elements_located((By.CSS_SELECTOR, selectors))
             )
         except TimeoutException:
-            logger.warning("Timeout waiting for job cards.")
+            current_url = getattr(driver, "current_url", "")
+            title = getattr(driver, "title", "")
+            try:
+                body_text = driver.find_element(By.TAG_NAME, "body").text
+            except Exception:
+                body_text = ""
+            summary = " ".join(body_text.split())[:500]
+            logger.warning(
+                "Timeout waiting for job cards. URL=%s title=%r page=%r",
+                current_url,
+                title,
+                summary,
+            )
             return []
 
         seen = 0

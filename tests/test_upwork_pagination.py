@@ -9,6 +9,21 @@ from upwork_scraper.selenium_scraper import UpworkSeleniumScraper
 
 
 class UpworkPaginationTests(unittest.TestCase):
+    def test_detects_cloudflare_verification_page(self) -> None:
+        class _Body:
+            text = "Cloudflare Ray ID: abc123"
+
+        class _Driver:
+            title = "Just a moment..."
+
+            @staticmethod
+            def find_element(*_args):
+                return _Body()
+
+        self.assertTrue(
+            UpworkSeleniumScraper._is_verification_page(_Driver())
+        )
+
     def test_detail_location_keeps_only_country_line(self) -> None:
         self.assertEqual(
             UpworkSeleniumScraper._clean_client_location(
